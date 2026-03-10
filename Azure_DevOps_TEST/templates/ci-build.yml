@@ -1,0 +1,70 @@
+# Template CI para .NET Core / .NET 5+
+# Uso: compilar, probar, escanear y publicar artefacto
+# Referencia: Manual Azure DevOps — Sección 12 y Apéndice A
+
+parameters:
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+  - name: dotnetVersion
+    type: string
+    default: '10.x'
+  - name: projectPath
+    type: string
+    default: 'Azure_DevOps_TEST/Azure_DevOps_TEST.csproj'
+  - name: artifactName
+    type: string
+    default: 'WeatherApp'
+
+steps:
+  - task: UseDotNet@2
+    displayName: 'Instalar .NET SDK ${{ parameters.dotnetVersion }}'
+    inputs:
+      packageType: 'sdk'
+      version: '${{ parameters.dotnetVersion }}'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Restore NuGet Packages'
+    inputs:
+      command: 'restore'
+      projects: '${{ parameters.projectPath }}'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Build — ${{ parameters.buildConfiguration }}'
+    inputs:
+      command: 'build'
+      projects: '${{ parameters.projectPath }}'
+      arguments: '--configuration ${{ parameters.buildConfiguration }} --no-restore'
+
+  # SAST — Microsoft Security DevOps (requiere extensión instalada)
+  # Referencia: Manual — Sección 14
+  - task: MicrosoftSecurityDevOps@1
+    displayName: 'SAST — Microsoft Security DevOps'
+    inputs:
+      categories: 'code'
+    continueOnError: true
+
+  # Dependency Scan — Auditoría de vulnerabilidades NuGet
+  - task: DotNetCoreCLI@2
+    displayName: 'Dependency Scan — NuGet Audit'
+    inputs:
+      command: 'custom'
+      custom: 'list'
+      arguments: 'package --vulnerable --include-transitive'
+      projects: '${{ parameters.projectPath }}'
+    continueOnError: true
+
+  # Publicar aplicación
+  - task: DotNetCoreCLI@2
+    displayName: 'Publish'
+    inputs:
+      command: 'publish'
+      projects: '${{ parameters.projectPath }}'
+      arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)'
+      publishWebProjects: false
+
+  # Publicar artefacto versionado
+  # Referencia: Manual — Principio 2 (Artefactos Inmutables)
+  - publish: $(Build.ArtifactStagingDirectory)
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: 'Publicar Artefacto'

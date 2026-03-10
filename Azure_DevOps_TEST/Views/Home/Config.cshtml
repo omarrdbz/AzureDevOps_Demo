@@ -1,0 +1,110 @@
+@{
+    ViewData["Title"] = "Configuración y Secretos";
+}
+
+<div class="container">
+    <h1>🔧 Estado de Configuración</h1>
+    <p class="lead">
+        Esta página muestra el estado de los secretos y configuración de la aplicación.
+        En Azure DevOps, estos valores se inyectan desde <strong>Variable Groups</strong> cifrados.
+    </p>
+
+    <div class="alert alert-info">
+        <strong>Entorno actual:</strong> @ViewData["Environment"]
+    </div>
+
+    <h3 class="mt-4">Variables de Configuración</h3>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Variable</th>
+                <th>Valor (enmascarado)</th>
+                <th>Variable Group en Azure DevOps</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>WeatherApi:ApiKey</code></td>
+                <td><code>@ViewData["ApiKeyMasked"]</code></td>
+                <td>
+                    <span class="badge bg-danger">🔒 Secreto</span>
+                    <code>WeatherApi__ApiKey</code>
+                </td>
+            </tr>
+            <tr>
+                <td><code>WeatherApi:BaseUrl</code></td>
+                <td><code>@ViewData["BaseUrl"]</code></td>
+                <td><code>WeatherApi__BaseUrl</code></td>
+            </tr>
+            <tr>
+                <td><code>WeatherApi:DefaultCity</code></td>
+                <td><code>@ViewData["DefaultCity"]</code></td>
+                <td><code>WeatherApi__DefaultCity</code></td>
+            </tr>
+            <tr>
+                <td><code>WeatherApi:CacheDurationMinutes</code></td>
+                <td><code>@ViewData["CacheDuration"]</code></td>
+                <td><code>WeatherApi__CacheDurationMinutes</code></td>
+            </tr>
+            <tr>
+                <td><code>ConnectionStrings:WeatherDb</code></td>
+                <td><code>@ViewData["ConnectionStringMasked"]</code></td>
+                <td>
+                    <span class="badge bg-danger">🔒 Secreto</span>
+                    <code>ConnectionStrings__WeatherDb</code>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3 class="mt-4">Mapeo a Variable Groups de Azure DevOps</h3>
+    <div class="card">
+        <div class="card-body">
+            <p>Según el manual, se deben crear los siguientes Variable Groups en
+                <strong>Pipelines → Library</strong>:</p>
+            <table class="table table-bordered">
+                <thead class="table-dark">
+                    <tr>
+                        <th>Variable Group</th>
+                        <th>Entorno</th>
+                        <th>Variables</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>vg-weatherapp-test</code></td>
+                        <td>Testing</td>
+                        <td rowspan="2">
+                            <ul class="mb-0">
+                                <li><code>ConnectionStrings__WeatherDb</code> 🔒</li>
+                                <li><code>WeatherApi__ApiKey</code> 🔒</li>
+                                <li><code>WeatherApi__BaseUrl</code></li>
+                                <li><code>WeatherApi__DefaultCity</code></li>
+                                <li><code>AppPoolName</code></li>
+                                <li><code>WebsiteName</code></li>
+                                <li><code>DeployPath</code></li>
+                                <li><code>SiteUrl</code></li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>vg-weatherapp-prod</code></td>
+                        <td>Producción</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <h3 class="mt-4">Health Check Endpoint</h3>
+    <div class="card">
+        <div class="card-body">
+            <p>El endpoint <code>/health</code> está disponible para que el pipeline CD verifique
+                el estado de la aplicación post-deploy:</p>
+            <pre class="bg-dark text-light p-3 rounded"><code>GET /health → 200 OK (Healthy)</code></pre>
+            <a href="/health" target="_blank" class="btn btn-outline-success">
+                Probar Health Check →
+            </a>
+        </div>
+    </div>
+</div>

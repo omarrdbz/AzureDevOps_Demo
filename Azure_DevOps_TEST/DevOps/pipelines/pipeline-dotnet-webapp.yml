@@ -1,0 +1,173 @@
+# =============================================================================
+# Pipeline Principal — .NET Core / .NET 5+ Web Application
+# =============================================================================
+# Pipeline multi-stage completo:
+#   Stage 1: CI  — Build, Test, SAST, Publish Artifact (Microsoft-hosted)
+#   Stage 2: CD  — Deploy to Dev    (Self-hosted, sin aprobación)
+#   Stage 3: CD  — Deploy to Test   (Self-hosted, depende de Dev)
+#   Stage 4: CD  — Deploy to Prod   (Self-hosted, aprobación manual obligatoria)
+#
+# Estándar: Separación CI/CD, artefactos inmutables, seguridad progresiva.
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nombre del pipeline (usado en Build.BuildNumber)
+# ─────────────────────────────────────────────────────────────────────────────
+name: '$(Date:yyyyMMdd).$(Rev:r)'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ─────────────────────────────────────────────────────────────────────────────
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - src/**
+    exclude:
+      - '**/*.md'
+      - 'docs/**'
+
+# No usar trigger de PR — se maneja con Build Validation en branch policies
+pr: none
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables Globales
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  # Configuración del proyecto
+  dotnetVersion: '8.0.x'
+  buildConfiguration: 'Release'
+  projectPath: 'src/**/*.csproj'
+  testProjectPath: 'src/**/*Tests*.csproj'
+  runtimeIdentifier: 'win-x64'
+  artifactName: 'drop-dotnet-$(Build.BuildNumber)'
+
+  # Nombre de la aplicación (usado en rutas y nombres)
+  appName: 'MiAplicacionWeb'
+
+  # Deshabilitar CI automático si se quiere control manual
+  # trigger: none  (descomentar si se desea)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stages
+# ─────────────────────────────────────────────────────────────────────────────
+stages:
+  # =========================================================================
+  # STAGE 1: CI — Build, Test, Scan, Publish Artifact
+  # =========================================================================
+  # Ejecuta en Microsoft-hosted agent (efímero, sin acceso a red On-Prem)
+  # =========================================================================
+  - template: ../templates/stages-ci.yml
+    parameters:
+      stageName: 'CI'
+      stageDisplayName: '🔨 CI — Build, Test & Scan'
+      vmImage: 'windows-latest'
+      projectType: 'dotnet'
+      dotnetVersion: $(dotnetVersion)
+      projectPath: $(projectPath)
+      testProjectPath: $(testProjectPath)
+      buildConfiguration: $(buildConfiguration)
+      artifactName: $(artifactName)
+      runtimeIdentifier: $(runtimeIdentifier)
+      enableSAST: true
+      enableDependencyScan: true
+      enableTests: true
+
+  # =========================================================================
+  # STAGE 2: CD — Deploy to Dev
+  # =========================================================================
+  # - Sin aprobación manual
+  # - Agente self-hosted en Pool-Dev
+  # - Se ejecuta automáticamente si CI fue exitoso
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Dev'
+      stageDisplayName: '🚀 CD — Deploy to Dev'
+      dependsOn:
+        - CI
+      condition: succeeded()
+      projectType: 'dotnet'
+      environment: 'Dev'
+      pool: 'Pool-Dev'
+      variableGroup: 'vg-dotnet-dev'
+      websiteName: '$(appName)-Dev'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName)-dev.empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/health'
+      healthCheckTimeout: 30
+      healthCheckRetries: 3
+      enableAutoRollback: true
+      maxBackups: 5
+      enableConfigTransform: true
+
+  # =========================================================================
+  # STAGE 3: CD — Deploy to Test
+  # =========================================================================
+  # - Depende de que Dev haya sido exitoso
+  # - Agente self-hosted en Pool-Test
+  # - Aprobación opcional (configurable en el Environment)
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Test'
+      stageDisplayName: '🧪 CD — Deploy to Test'
+      dependsOn:
+        - CD_Dev
+      condition: succeeded()
+      projectType: 'dotnet'
+      environment: 'Test'
+      pool: 'Pool-Test'
+      variableGroup: 'vg-dotnet-test'
+      websiteName: '$(appName)-Test'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName)-test.empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/health'
+      healthCheckTimeout: 30
+      healthCheckRetries: 3
+      enableAutoRollback: true
+      maxBackups: 5
+      enableConfigTransform: true
+
+  # =========================================================================
+  # STAGE 4: CD — Deploy to Prod
+  # =========================================================================
+  # - Depende de que Test haya sido exitoso
+  # - Agente self-hosted en Pool-Prod
+  # - ⚠️ APROBACIÓN MANUAL OBLIGATORIA (configurada en el Environment "Prod")
+  # - Solo desde rama 'main' (configurar Branch Control en el Environment)
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Prod'
+      stageDisplayName: '🏭 CD — Deploy to Prod'
+      dependsOn:
+        - CD_Test
+      # Solo ejecutar si Test fue exitoso Y estamos en la rama main
+      condition: |
+        and(
+          succeeded(),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main')
+        )
+      projectType: 'dotnet'
+      environment: 'Prod'
+      pool: 'Pool-Prod'
+      variableGroup: 'vg-dotnet-prod'
+      websiteName: '$(appName)'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName).empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/health'
+      healthCheckTimeout: 60
+      healthCheckRetries: 5
+      enableAutoRollback: true
+      maxBackups: 10
+      enableConfigTransform: true

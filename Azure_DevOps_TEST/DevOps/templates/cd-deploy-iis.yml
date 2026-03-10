@@ -1,0 +1,439 @@
+# =============================================================================
+# Template CD — Deploy a IIS On-Prem (.NET Core / .NET 5+)
+# =============================================================================
+# Propósito: Descargar artefacto inmutable, hacer backup, desplegar en IIS,
+#            inyectar configuración del entorno y verificar health check.
+# Agente: Self-hosted (dedicado por entorno, cuenta svc_ado_deploy).
+# Uso: Se invoca desde stages-cd.yml o directamente desde el pipeline principal.
+# =============================================================================
+
+parameters:
+  # Nombre del environment de Azure DevOps (Dev, Test, Prod)
+  - name: environment
+    type: string
+
+  # Nombre del Agent Pool self-hosted
+  - name: pool
+    type: string
+
+  # Nombre del sitio IIS
+  - name: websiteName
+    type: string
+
+  # Ruta física de deploy en el servidor
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\MiAplicacion'
+
+  # Nombre del Variable Group con secretos del entorno
+  - name: variableGroup
+    type: string
+
+  # Nombre del artefacto a descargar (debe coincidir con el publicado en CI)
+  - name: artifactName
+    type: string
+    default: 'drop'
+
+  # Nombre del pipeline que generó el artefacto (si es diferente al actual)
+  - name: pipelineResource
+    type: string
+    default: 'current'
+
+  # URL del sitio para health check
+  - name: siteUrl
+    type: string
+
+  # Ruta de backups
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\MiAplicacion'
+
+  # Endpoint específico para health check
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+
+  # Timeout para health check (segundos)
+  - name: healthCheckTimeout
+    type: number
+    default: 30
+
+  # Número máximo de reintentos del health check
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  # Habilitar rollback automático si health check falla
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  # Máximo de backups a retener
+  - name: maxBackups
+    type: number
+    default: 5
+
+  # Habilitar transformación de configuración (appsettings.json)
+  - name: enableConfigTransform
+    type: boolean
+    default: true
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Paso 1: Descargar Artefacto
+  # ---------------------------------------------------------------------------
+  - task: DownloadPipelineArtifact@2
+    displayName: '📥 Descargar artefacto — ${{ parameters.artifactName }}'
+    inputs:
+      buildType: '${{ parameters.pipelineResource }}'
+      artifactName: '${{ parameters.artifactName }}'
+      targetPath: '$(Pipeline.Workspace)/artifact'
+
+  # ---------------------------------------------------------------------------
+  # Paso 2: Verificar contenido del artefacto
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  VERIFICANDO ARTEFACTO"
+      Write-Host "============================================="
+      
+      $artifactPath = "$(Pipeline.Workspace)/artifact"
+      
+      if (-not (Test-Path $artifactPath)) {
+          throw "ERROR: Artefacto no encontrado en $artifactPath"
+      }
+      
+      $files = Get-ChildItem -Path $artifactPath -Recurse
+      Write-Host "Total archivos: $($files.Count)"
+      Write-Host "Tamaño total: $([math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 2)) MB"
+      Write-Host ""
+      
+      # Listar archivos principales
+      $files | Select-Object -First 20 | ForEach-Object {
+          Write-Host "  $($_.FullName.Replace($artifactPath, '.'))"
+      }
+      
+      if ($files.Count -gt 20) {
+          Write-Host "  ... y $($files.Count - 20) archivos más"
+      }
+    displayName: '🔍 Verificar contenido del artefacto'
+
+  # ---------------------------------------------------------------------------
+  # Paso 3: Limpiar backups antiguos (retener solo los últimos N)
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $backupPath = "${{ parameters.backupPath }}"
+      $maxBackups = ${{ parameters.maxBackups }}
+      
+      if (Test-Path $backupPath) {
+          $backups = Get-ChildItem $backupPath -Directory | Sort-Object CreationTime -Descending
+          $toDelete = $backups | Select-Object -Skip $maxBackups
+          
+          if ($toDelete) {
+              Write-Host "Eliminando $($toDelete.Count) backup(s) antiguo(s)..."
+              $toDelete | ForEach-Object {
+                  Write-Host "  Eliminando: $($_.Name)"
+                  Remove-Item $_.FullName -Recurse -Force
+              }
+          } else {
+              Write-Host "No hay backups para limpiar (total: $($backups.Count), máximo: $maxBackups)"
+          }
+      } else {
+          Write-Host "Creando directorio de backups: $backupPath"
+          New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+      }
+    displayName: '🧹 Limpiar backups antiguos'
+
+  # ---------------------------------------------------------------------------
+  # Paso 4: Backup del deploy actual
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $deployPath = "${{ parameters.deployPath }}"
+      $backupPath = "${{ parameters.backupPath }}"
+      $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupDir = Join-Path $backupPath "backup-$timestamp"
+      
+      if (Test-Path $deployPath) {
+          $itemCount = (Get-ChildItem $deployPath -Recurse).Count
+          
+          if ($itemCount -gt 0) {
+              Write-Host "Creando backup en: $backupDir"
+              Copy-Item -Path $deployPath -Destination $backupDir -Recurse -Force
+              
+              $backupSize = [math]::Round(
+                  (Get-ChildItem $backupDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB, 2
+              )
+              Write-Host "✅ Backup creado: $backupSize MB ($itemCount archivos)"
+              
+              # Guardar ruta del backup para posible rollback
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]$backupDir"
+          } else {
+              Write-Host "⚠️ Carpeta de deploy vacía, no se requiere backup"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+          }
+      } else {
+          Write-Host "⚠️ Carpeta de deploy no existe, creando: $deployPath"
+          New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+          Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+      }
+    displayName: '💾 Backup del deploy actual'
+
+  # ---------------------------------------------------------------------------
+  # Paso 5: Detener sitio IIS
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Import-Module WebAdministration -ErrorAction Stop
+      
+      $websiteName = "${{ parameters.websiteName }}"
+      $site = Get-Website -Name $websiteName -ErrorAction SilentlyContinue
+      
+      if ($site) {
+          if ($site.State -eq "Started") {
+              Write-Host "Deteniendo sitio IIS: $websiteName"
+              Stop-Website -Name $websiteName
+              
+              # Esperar a que se detenga completamente
+              $retries = 0
+              while ((Get-Website -Name $websiteName).State -ne "Stopped" -and $retries -lt 10) {
+                  Start-Sleep -Seconds 2
+                  $retries++
+              }
+              
+              Write-Host "✅ Sitio detenido"
+          } else {
+              Write-Host "⚠️ Sitio ya estaba detenido"
+          }
+          
+          # Detener el Application Pool también
+          $appPool = $site.ApplicationPool
+          if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+              Stop-WebAppPool -Name $appPool
+              Write-Host "✅ App Pool '$appPool' detenido"
+          }
+      } else {
+          Write-Warning "Sitio IIS '$websiteName' no encontrado. Verificar nombre."
+      }
+    displayName: '⏹️ Detener sitio IIS'
+
+  # ---------------------------------------------------------------------------
+  # Paso 6: Deploy — Copiar archivos nuevos
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $deployPath = "${{ parameters.deployPath }}"
+      $artifactPath = "$(Pipeline.Workspace)/artifact"
+      
+      # Buscar el archivo .zip del artefacto
+      $zipFile = Get-ChildItem -Path $artifactPath -Filter "*.zip" -Recurse | Select-Object -First 1
+      
+      if ($zipFile) {
+          Write-Host "Encontrado paquete: $($zipFile.FullName)"
+          
+          # Limpiar carpeta de deploy
+          Write-Host "Limpiando carpeta de deploy..."
+          Get-ChildItem $deployPath -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Extraer el zip
+          Write-Host "Extrayendo paquete..."
+          Expand-Archive -Path $zipFile.FullName -DestinationPath $deployPath -Force
+          
+          $deployedFiles = (Get-ChildItem $deployPath -Recurse).Count
+          Write-Host "✅ Desplegados $deployedFiles archivos"
+      } else {
+          Write-Host "No se encontró archivo .zip, copiando carpeta directamente..."
+          
+          # Limpiar carpeta de deploy
+          Get-ChildItem $deployPath -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Copiar contenido directamente
+          Copy-Item -Path "$artifactPath\*" -Destination $deployPath -Recurse -Force
+          
+          $deployedFiles = (Get-ChildItem $deployPath -Recurse).Count
+          Write-Host "✅ Desplegados $deployedFiles archivos"
+      }
+    displayName: '🚀 Deploy — Copiar archivos al servidor'
+
+  # ---------------------------------------------------------------------------
+  # Paso 7: Transformar configuración (appsettings.json)
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableConfigTransform, true) }}:
+    - powershell: |
+        $deployPath = "${{ parameters.deployPath }}"
+        $appsettingsPath = Join-Path $deployPath "appsettings.json"
+        
+        if (Test-Path $appsettingsPath) {
+            Write-Host "Aplicando transformaciones de configuración..."
+            
+            $config = Get-Content $appsettingsPath -Raw | ConvertFrom-Json
+            
+            # Inyectar Connection String desde Variable Group
+            if ($env:ConnectionString) {
+                if (-not $config.ConnectionStrings) {
+                    $config | Add-Member -Type NoteProperty -Name "ConnectionStrings" -Value @{} -Force
+                }
+                $config.ConnectionStrings.DefaultConnection = $env:ConnectionString
+                Write-Host "  ✅ ConnectionString inyectado"
+            }
+            
+            # Inyectar variables de entorno adicionales
+            if ($env:AppSettings_Environment) {
+                if (-not $config.AppSettings) {
+                    $config | Add-Member -Type NoteProperty -Name "AppSettings" -Value @{} -Force
+                }
+                $config.AppSettings.Environment = $env:AppSettings_Environment
+                Write-Host "  ✅ Environment configurado: $env:AppSettings_Environment"
+            }
+            
+            # Guardar configuración transformada
+            $config | ConvertTo-Json -Depth 10 | Set-Content $appsettingsPath -Encoding UTF8
+            Write-Host "✅ Configuración transformada guardada"
+        } else {
+            Write-Host "⚠️ No se encontró appsettings.json en $deployPath"
+        }
+      displayName: '⚙️ Transformar configuración (appsettings.json)'
+      env:
+        ConnectionString: $(ConnectionString)
+        AppSettings_Environment: ${{ parameters.environment }}
+
+  # ---------------------------------------------------------------------------
+  # Paso 8: Iniciar sitio IIS
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Import-Module WebAdministration -ErrorAction Stop
+      
+      $websiteName = "${{ parameters.websiteName }}"
+      $site = Get-Website -Name $websiteName
+      
+      # Iniciar Application Pool
+      $appPool = $site.ApplicationPool
+      if ((Get-WebAppPoolState -Name $appPool).Value -ne "Started") {
+          Start-WebAppPool -Name $appPool
+          Write-Host "✅ App Pool '$appPool' iniciado"
+      }
+      
+      # Iniciar Website
+      Start-Website -Name $websiteName
+      
+      # Esperar a que inicie
+      $retries = 0
+      while ((Get-Website -Name $websiteName).State -ne "Started" -and $retries -lt 10) {
+          Start-Sleep -Seconds 2
+          $retries++
+      }
+      
+      $state = (Get-Website -Name $websiteName).State
+      if ($state -eq "Started") {
+          Write-Host "✅ Sitio IIS '$websiteName' iniciado correctamente"
+      } else {
+          throw "❌ No se pudo iniciar el sitio IIS. Estado: $state"
+      }
+    displayName: '▶️ Iniciar sitio IIS'
+
+  # ---------------------------------------------------------------------------
+  # Paso 9: Health Check
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $siteUrl = "${{ parameters.siteUrl }}"
+      $endpoint = "${{ parameters.healthCheckEndpoint }}"
+      $fullUrl = "${siteUrl}${endpoint}"
+      $timeout = ${{ parameters.healthCheckTimeout }}
+      $maxRetries = ${{ parameters.healthCheckRetries }}
+      $enableRollback = [System.Convert]::ToBoolean("${{ parameters.enableAutoRollback }}")
+      $lastBackup = "$(LastBackupPath)"
+      $deployPath = "${{ parameters.deployPath }}"
+      $websiteName = "${{ parameters.websiteName }}"
+      
+      Write-Host "============================================="
+      Write-Host "  HEALTH CHECK"
+      Write-Host "============================================="
+      Write-Host "URL: $fullUrl"
+      Write-Host "Timeout: ${timeout}s"
+      Write-Host "Max reintentos: $maxRetries"
+      Write-Host ""
+      
+      # Esperar unos segundos para que la app inicie
+      Write-Host "Esperando 10 segundos para inicio de la aplicación..."
+      Start-Sleep -Seconds 10
+      
+      $success = $false
+      for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+              Write-Host "Intento $i de $maxRetries..."
+              $response = Invoke-WebRequest -Uri $fullUrl -UseBasicParsing -TimeoutSec $timeout -ErrorAction Stop
+              
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Health check exitoso (HTTP $($response.StatusCode))"
+                  $success = $true
+                  break
+              } else {
+                  Write-Host "⚠️ Respuesta inesperada: HTTP $($response.StatusCode)"
+              }
+          } catch {
+              Write-Host "❌ Intento $i falló: $($_.Exception.Message)"
+              
+              if ($i -lt $maxRetries) {
+                  Write-Host "Esperando 10 segundos antes del siguiente intento..."
+                  Start-Sleep -Seconds 10
+              }
+          }
+      }
+      
+      if (-not $success) {
+          Write-Host ""
+          Write-Host "❌ HEALTH CHECK FALLIDO después de $maxRetries intentos"
+          
+          if ($enableRollback -and $lastBackup -and (Test-Path $lastBackup)) {
+              Write-Host ""
+              Write-Host "============================================="
+              Write-Host "  INICIANDO ROLLBACK AUTOMÁTICO"
+              Write-Host "============================================="
+              Write-Host "Restaurando desde: $lastBackup"
+              
+              Import-Module WebAdministration
+              
+              # Detener sitio
+              Stop-Website -Name $websiteName -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 3
+              
+              # Restaurar backup
+              Get-ChildItem $deployPath -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
+              
+              # Reiniciar sitio
+              Start-Website -Name $websiteName
+              Start-Sleep -Seconds 5
+              
+              # Verificar rollback
+              try {
+                  $rollbackCheck = Invoke-WebRequest -Uri $fullUrl -UseBasicParsing -TimeoutSec $timeout
+                  if ($rollbackCheck.StatusCode -eq 200) {
+                      Write-Host "✅ Rollback exitoso — aplicación restaurada"
+                  }
+              } catch {
+                  Write-Host "⚠️ Rollback completado pero health check aún falla"
+              }
+              
+              throw "Deploy falló — se realizó rollback a: $lastBackup"
+          } else {
+              throw "Deploy falló — health check no pasó. Rollback manual necesario."
+          }
+      }
+    displayName: '🏥 Health Check + Auto-Rollback'
+
+  # ---------------------------------------------------------------------------
+  # Paso 10: Resumen del Deploy
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  DEPLOY SUMMARY"
+      Write-Host "============================================="
+      Write-Host "Environment:     ${{ parameters.environment }}"
+      Write-Host "Website:         ${{ parameters.websiteName }}"
+      Write-Host "Deploy Path:     ${{ parameters.deployPath }}"
+      Write-Host "Site URL:        ${{ parameters.siteUrl }}"
+      Write-Host "Artifact:        ${{ parameters.artifactName }}"
+      Write-Host "Build Number:    $(Build.BuildNumber)"
+      Write-Host "Deployed By:     $(Build.RequestedFor)"
+      Write-Host "Timestamp:       $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+      Write-Host "============================================="
+    displayName: '📋 Deploy Summary'
+    condition: succeededOrFailed()

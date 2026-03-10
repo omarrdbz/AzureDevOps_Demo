@@ -1,0 +1,33 @@
+# Stage wrapper para CI
+# Encapsula el template CI con pool y condiciones
+# Referencia: Manual Azure DevOps — Apéndice A
+
+parameters:
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+  - name: dotnetVersion
+    type: string
+    default: '10.x'
+  - name: projectPath
+    type: string
+    default: 'Azure_DevOps_TEST/Azure_DevOps_TEST.csproj'
+  - name: artifactName
+    type: string
+    default: 'WeatherApp'
+
+stages:
+  - stage: CI
+    displayName: 'CI — Build, Test & Scan'
+    pool:
+      vmImage: 'windows-latest'
+    jobs:
+      - job: Build
+        displayName: 'Build & Publish Artifact'
+        steps:
+          - template: ci-build.yml
+            parameters:
+              buildConfiguration: ${{ parameters.buildConfiguration }}
+              dotnetVersion: ${{ parameters.dotnetVersion }}
+              projectPath: ${{ parameters.projectPath }}
+              artifactName: ${{ parameters.artifactName }}

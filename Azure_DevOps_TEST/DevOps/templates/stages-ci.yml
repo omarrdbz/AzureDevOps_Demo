@@ -1,0 +1,173 @@
+# =============================================================================
+# Template Stage CI — Wrapper para ejecutar templates CI
+# =============================================================================
+# Propósito: Encapsular la lógica de CI en un stage reutilizable que configura
+#            el agente Microsoft-hosted, las condiciones y el template CI.
+# Uso: Se invoca desde el pipeline principal.
+#
+# Permite seleccionar entre:
+#   - ci-build.yml          (.NET Core / .NET 5+)
+#   - ci-build-netfx.yml    (.NET Framework 4.x)
+# =============================================================================
+
+parameters:
+  # ---------------------------------------------------------------------------
+  # Parámetros del Stage
+  # ---------------------------------------------------------------------------
+  - name: stageName
+    type: string
+    default: 'CI'
+
+  - name: stageDisplayName
+    type: string
+    default: 'Build, Test & Scan'
+
+  - name: vmImage
+    type: string
+    default: 'windows-latest'
+
+  # Tipo de proyecto: 'dotnet' o 'netfx'
+  - name: projectType
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - netfx
+
+  # Condición para ejecutar el stage
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+  # ---------------------------------------------------------------------------
+  # Parámetros para .NET Core (ci-build.yml)
+  # ---------------------------------------------------------------------------
+  - name: dotnetVersion
+    type: string
+    default: '8.0.x'
+
+  - name: projectPath
+    type: string
+    default: 'src/**/*.csproj'
+
+  - name: testProjectPath
+    type: string
+    default: 'src/**/*Tests*.csproj'
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  - name: artifactName
+    type: string
+    default: 'drop'
+
+  - name: enableSAST
+    type: boolean
+    default: true
+
+  - name: enableDependencyScan
+    type: boolean
+    default: true
+
+  - name: enableTests
+    type: boolean
+    default: true
+
+  - name: runtimeIdentifier
+    type: string
+    default: 'win-x64'
+
+  - name: publishArgs
+    type: string
+    default: ''
+
+  # ---------------------------------------------------------------------------
+  # Parámetros para .NET Framework (ci-build-netfx.yml)
+  # ---------------------------------------------------------------------------
+  - name: solution
+    type: string
+    default: '**/*.sln'
+
+  - name: buildPlatform
+    type: string
+    default: 'Any CPU'
+
+  - name: nugetVersion
+    type: string
+    default: '6.x'
+
+  - name: testAssemblyPattern
+    type: string
+    default: |
+      **\*Tests*.dll
+      **\*Test*.dll
+      !**\*TestAdapter*.dll
+      !**\obj\**
+
+  - name: generateWebDeployPackage
+    type: boolean
+    default: true
+
+  - name: additionalMsbuildArgs
+    type: string
+    default: ''
+
+  - name: nugetConfigPath
+    type: string
+    default: ''
+
+  - name: vsVersion
+    type: string
+    default: 'latest'
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: '${{ parameters.stageDisplayName }}'
+    condition: ${{ parameters.condition }}
+
+    jobs:
+      - job: Build
+        displayName: 'Build & Publish Artifact'
+        pool:
+          vmImage: '${{ parameters.vmImage }}'
+
+        # Timeout para el job completo (90 minutos)
+        timeoutInMinutes: 90
+
+        steps:
+          # ===========================================================
+          # .NET Core / .NET 5+
+          # ===========================================================
+          - ${{ if eq(parameters.projectType, 'dotnet') }}:
+            - template: ci-build.yml
+              parameters:
+                dotnetVersion: ${{ parameters.dotnetVersion }}
+                projectPath: ${{ parameters.projectPath }}
+                testProjectPath: ${{ parameters.testProjectPath }}
+                buildConfiguration: ${{ parameters.buildConfiguration }}
+                artifactName: ${{ parameters.artifactName }}
+                enableSAST: ${{ parameters.enableSAST }}
+                enableDependencyScan: ${{ parameters.enableDependencyScan }}
+                enableTests: ${{ parameters.enableTests }}
+                runtimeIdentifier: ${{ parameters.runtimeIdentifier }}
+                publishArgs: ${{ parameters.publishArgs }}
+
+          # ===========================================================
+          # .NET Framework 4.x
+          # ===========================================================
+          - ${{ if eq(parameters.projectType, 'netfx') }}:
+            - template: ci-build-netfx.yml
+              parameters:
+                solution: ${{ parameters.solution }}
+                buildPlatform: ${{ parameters.buildPlatform }}
+                buildConfiguration: ${{ parameters.buildConfiguration }}
+                nugetVersion: ${{ parameters.nugetVersion }}
+                artifactName: ${{ parameters.artifactName }}
+                enableSAST: ${{ parameters.enableSAST }}
+                enableTests: ${{ parameters.enableTests }}
+                testAssemblyPattern: ${{ parameters.testAssemblyPattern }}
+                generateWebDeployPackage: ${{ parameters.generateWebDeployPackage }}
+                additionalMsbuildArgs: ${{ parameters.additionalMsbuildArgs }}
+                nugetConfigPath: ${{ parameters.nugetConfigPath }}
+                vsVersion: ${{ parameters.vsVersion }}

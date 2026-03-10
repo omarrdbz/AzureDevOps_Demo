@@ -1,0 +1,586 @@
+# =============================================================================
+# Template CD — Deploy a IIS On-Prem (.NET Framework 4.x Legacy)
+# =============================================================================
+# Propósito: Descargar artefacto (Web Deploy Package o carpeta publicada),
+#            hacer backup, desplegar en IIS, inyectar secretos en web.config
+#            y verificar health check.
+# Agente: Self-hosted (dedicado por entorno, cuenta svc_ado_deploy).
+# Uso: Se invoca desde stages-cd.yml o directamente desde el pipeline principal.
+#
+# Diferencias vs cd-deploy-iis.yml (.NET Core):
+#   - Soporta Web Deploy Package (.zip con .deploy.cmd)
+#   - Transforma web.config (XML) en lugar de appsettings.json
+#   - Opción de usar msdeploy.exe o xcopy
+# =============================================================================
+
+parameters:
+  # Nombre del environment de Azure DevOps (Dev, Test, Prod)
+  - name: environment
+    type: string
+
+  # Nombre del Agent Pool self-hosted
+  - name: pool
+    type: string
+
+  # Nombre del sitio IIS
+  - name: websiteName
+    type: string
+
+  # Ruta física de deploy en el servidor
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\MiAplicacion'
+
+  # Nombre del Variable Group con secretos del entorno
+  - name: variableGroup
+    type: string
+
+  # Nombre del artefacto a descargar
+  - name: artifactName
+    type: string
+    default: 'drop-netfx'
+
+  # Nombre del pipeline que generó el artefacto
+  - name: pipelineResource
+    type: string
+    default: 'current'
+
+  # URL del sitio para health check
+  - name: siteUrl
+    type: string
+
+  # Ruta de backups
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\MiAplicacion'
+
+  # Usar Web Deploy (msdeploy.exe) en lugar de xcopy
+  # Requiere que Web Deploy esté instalado en el servidor
+  - name: useWebDeploy
+    type: boolean
+    default: false
+
+  # Ruta a msdeploy.exe (solo si useWebDeploy = true)
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  # Endpoint específico para health check
+  - name: healthCheckEndpoint
+    type: string
+    default: '/'
+
+  # Timeout para health check (segundos)
+  - name: healthCheckTimeout
+    type: number
+    default: 30
+
+  # Número máximo de reintentos del health check
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  # Habilitar rollback automático si health check falla
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  # Máximo de backups a retener
+  - name: maxBackups
+    type: number
+    default: 5
+
+  # Habilitar transformación de web.config
+  - name: enableWebConfigTransform
+    type: boolean
+    default: true
+
+  # Managed Runtime Version del App Pool (v4.0 para .NET Framework)
+  - name: managedRuntimeVersion
+    type: string
+    default: 'v4.0'
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Paso 1: Descargar Artefacto
+  # ---------------------------------------------------------------------------
+  - task: DownloadPipelineArtifact@2
+    displayName: '📥 Descargar artefacto — ${{ parameters.artifactName }}'
+    inputs:
+      buildType: '${{ parameters.pipelineResource }}'
+      artifactName: '${{ parameters.artifactName }}'
+      targetPath: '$(Pipeline.Workspace)/artifact'
+
+  # ---------------------------------------------------------------------------
+  # Paso 2: Verificar contenido del artefacto
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  VERIFICANDO ARTEFACTO (.NET Framework)"
+      Write-Host "============================================="
+      
+      $artifactPath = "$(Pipeline.Workspace)/artifact"
+      
+      if (-not (Test-Path $artifactPath)) {
+          throw "ERROR: Artefacto no encontrado en $artifactPath"
+      }
+      
+      # Verificar estructura
+      $files = Get-ChildItem -Path $artifactPath -Recurse
+      Write-Host "Total archivos: $($files.Count)"
+      Write-Host "Tamaño total: $([math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 2)) MB"
+      
+      # Detectar tipo de paquete
+      $webDeployPackage = Get-ChildItem -Path $artifactPath -Filter "*.zip" -Recurse | Select-Object -First 1
+      $deployCmd = Get-ChildItem -Path $artifactPath -Filter "*.deploy.cmd" -Recurse | Select-Object -First 1
+      $publishFolder = Get-ChildItem -Path $artifactPath -Directory -Filter "publish" -Recurse | Select-Object -First 1
+      $webDeployPkgFolder = Get-ChildItem -Path $artifactPath -Directory -Filter "WebDeployPackage" -Recurse | Select-Object -First 1
+      
+      if ($webDeployPkgFolder) {
+          Write-Host "Tipo: Web Deploy Package (carpeta WebDeployPackage)"
+          Write-Host "##vso[task.setvariable variable=PackageType]webdeploy"
+          Write-Host "##vso[task.setvariable variable=PackagePath]$($webDeployPkgFolder.FullName)"
+      } elseif ($deployCmd) {
+          Write-Host "Tipo: Web Deploy Package (.deploy.cmd detectado)"
+          Write-Host "##vso[task.setvariable variable=PackageType]webdeploy"
+          Write-Host "##vso[task.setvariable variable=PackagePath]$($webDeployPackage.DirectoryName)"
+      } elseif ($publishFolder) {
+          Write-Host "Tipo: Carpeta publicada"
+          Write-Host "##vso[task.setvariable variable=PackageType]folder"
+          Write-Host "##vso[task.setvariable variable=PackagePath]$($publishFolder.FullName)"
+      } else {
+          Write-Host "Tipo: Contenido directo"
+          Write-Host "##vso[task.setvariable variable=PackageType]folder"
+          Write-Host "##vso[task.setvariable variable=PackagePath]$artifactPath"
+      }
+    displayName: '🔍 Verificar contenido del artefacto'
+
+  # ---------------------------------------------------------------------------
+  # Paso 3: Limpiar backups antiguos
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $backupPath = "${{ parameters.backupPath }}"
+      $maxBackups = ${{ parameters.maxBackups }}
+      
+      if (Test-Path $backupPath) {
+          $backups = Get-ChildItem $backupPath -Directory | Sort-Object CreationTime -Descending
+          $toDelete = $backups | Select-Object -Skip $maxBackups
+          
+          if ($toDelete) {
+              Write-Host "Eliminando $($toDelete.Count) backup(s) antiguo(s)..."
+              $toDelete | ForEach-Object {
+                  Write-Host "  Eliminando: $($_.Name)"
+                  Remove-Item $_.FullName -Recurse -Force
+              }
+          }
+      } else {
+          Write-Host "Creando directorio de backups: $backupPath"
+          New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+      }
+    displayName: '🧹 Limpiar backups antiguos'
+
+  # ---------------------------------------------------------------------------
+  # Paso 4: Backup del deploy actual
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $deployPath = "${{ parameters.deployPath }}"
+      $backupPath = "${{ parameters.backupPath }}"
+      $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupDir = Join-Path $backupPath "backup-$timestamp"
+      
+      if (Test-Path $deployPath) {
+          $itemCount = (Get-ChildItem $deployPath -Recurse -File).Count
+          
+          if ($itemCount -gt 0) {
+              Write-Host "Creando backup en: $backupDir"
+              Copy-Item -Path $deployPath -Destination $backupDir -Recurse -Force
+              
+              $backupSize = [math]::Round(
+                  (Get-ChildItem $backupDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB, 2
+              )
+              Write-Host "✅ Backup creado: $backupSize MB ($itemCount archivos)"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]$backupDir"
+          } else {
+              Write-Host "⚠️ Carpeta de deploy vacía"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+          }
+      } else {
+          Write-Host "⚠️ Carpeta de deploy no existe, creando..."
+          New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+          Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+      }
+    displayName: '💾 Backup del deploy actual'
+
+  # ---------------------------------------------------------------------------
+  # Paso 5: Detener sitio IIS
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Import-Module WebAdministration -ErrorAction Stop
+      
+      $websiteName = "${{ parameters.websiteName }}"
+      $site = Get-Website -Name $websiteName -ErrorAction SilentlyContinue
+      
+      if ($site) {
+          # Detener Website
+          if ($site.State -eq "Started") {
+              Write-Host "Deteniendo sitio IIS: $websiteName"
+              Stop-Website -Name $websiteName
+              Start-Sleep -Seconds 3
+              Write-Host "✅ Sitio detenido"
+          }
+          
+          # Detener App Pool
+          $appPool = $site.ApplicationPool
+          if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+              Stop-WebAppPool -Name $appPool
+              Start-Sleep -Seconds 2
+              Write-Host "✅ App Pool '$appPool' detenido"
+          }
+      } else {
+          Write-Warning "Sitio IIS '$websiteName' no encontrado"
+      }
+    displayName: '⏹️ Detener sitio IIS'
+
+  # ---------------------------------------------------------------------------
+  # Paso 6A: Deploy con Web Deploy (msdeploy.exe)
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.useWebDeploy, true) }}:
+    - powershell: |
+        $msdeployPath = "${{ parameters.msdeployPath }}"
+        $websiteName = "${{ parameters.websiteName }}"
+        $packagePath = "$(PackagePath)"
+        
+        # Verificar que msdeploy existe
+        if (-not (Test-Path $msdeployPath)) {
+            throw "ERROR: msdeploy.exe no encontrado en $msdeployPath. Instalar Web Deploy o usar useWebDeploy: false"
+        }
+        
+        # Buscar el archivo .zip del paquete
+        $zipFile = Get-ChildItem -Path $packagePath -Filter "*.zip" -Recurse | Select-Object -First 1
+        
+        if (-not $zipFile) {
+            throw "ERROR: No se encontró Web Deploy Package (.zip) en $packagePath"
+        }
+        
+        Write-Host "Desplegando con Web Deploy..."
+        Write-Host "  Package:  $($zipFile.FullName)"
+        Write-Host "  Website:  $websiteName"
+        
+        & $msdeployPath `
+            -verb:sync `
+            -source:package="$($zipFile.FullName)" `
+            -dest:auto,computerName="localhost" `
+            -setParam:name="IIS Web Application Name",value="$websiteName" `
+            -allowUntrusted `
+            -verbose
+        
+        if ($LASTEXITCODE -ne 0) {
+            throw "ERROR: msdeploy falló con código de salida $LASTEXITCODE"
+        }
+        
+        Write-Host "✅ Web Deploy completado exitosamente"
+      displayName: '🚀 Deploy — Web Deploy (msdeploy.exe)'
+
+  # ---------------------------------------------------------------------------
+  # Paso 6B: Deploy con xcopy/PowerShell (sin Web Deploy)
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.useWebDeploy, false) }}:
+    - powershell: |
+        $deployPath = "${{ parameters.deployPath }}"
+        $packagePath = "$(PackagePath)"
+        $packageType = "$(PackageType)"
+        
+        Write-Host "Desplegando con xcopy/PowerShell..."
+        Write-Host "  Tipo de paquete: $packageType"
+        Write-Host "  Origen:          $packagePath"
+        Write-Host "  Destino:         $deployPath"
+        
+        # Limpiar carpeta de deploy
+        Write-Host "Limpiando carpeta de deploy..."
+        Get-ChildItem $deployPath -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        
+        if ($packageType -eq "webdeploy") {
+            # Extraer Web Deploy Package
+            $zipFile = Get-ChildItem -Path $packagePath -Filter "*.zip" -Recurse | Select-Object -First 1
+            
+            if ($zipFile) {
+                # Extraer a carpeta temporal
+                $tempDir = Join-Path $env:TEMP "deploy-extract-$(Get-Date -Format 'yyyyMMddHHmmss')"
+                Expand-Archive -Path $zipFile.FullName -DestinationPath $tempDir -Force
+                
+                # Buscar el contenido web dentro del paquete extraído
+                $contentDir = Get-ChildItem -Path $tempDir -Filter "Content" -Directory -Recurse | Select-Object -First 1
+                
+                if ($contentDir) {
+                    # Navegar hasta la carpeta del sitio web
+                    $webContent = Get-ChildItem -Path $contentDir.FullName -Recurse -Directory |
+                        Where-Object { Test-Path (Join-Path $_.FullName "web.config") } |
+                        Select-Object -First 1
+                    
+                    if ($webContent) {
+                        Copy-Item -Path "$($webContent.FullName)\*" -Destination $deployPath -Recurse -Force
+                    } else {
+                        Copy-Item -Path "$($contentDir.FullName)\*" -Destination $deployPath -Recurse -Force
+                    }
+                } else {
+                    # Copiar todo el contenido extraído
+                    Copy-Item -Path "$tempDir\*" -Destination $deployPath -Recurse -Force
+                }
+                
+                # Limpiar temporal
+                Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+            } else {
+                throw "ERROR: No se encontró archivo .zip en $packagePath"
+            }
+        } else {
+            # Copiar carpeta directamente
+            Copy-Item -Path "$packagePath\*" -Destination $deployPath -Recurse -Force
+        }
+        
+        $deployedFiles = (Get-ChildItem $deployPath -Recurse -File).Count
+        Write-Host "✅ Desplegados $deployedFiles archivos en $deployPath"
+      displayName: '🚀 Deploy — xcopy/PowerShell'
+
+  # ---------------------------------------------------------------------------
+  # Paso 7: Transformar web.config
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableWebConfigTransform, true) }}:
+    - powershell: |
+        $deployPath = "${{ parameters.deployPath }}"
+        $webConfigPath = Join-Path $deployPath "web.config"
+        
+        if (-not (Test-Path $webConfigPath)) {
+            Write-Warning "⚠️ web.config no encontrado en $deployPath"
+            exit 0
+        }
+        
+        Write-Host "Aplicando transformaciones a web.config..."
+        
+        # Cargar web.config como XML
+        [xml]$webConfig = Get-Content $webConfigPath -Encoding UTF8
+        
+        # ---------------------------------------------------------------
+        # Transformar Connection Strings
+        # ---------------------------------------------------------------
+        if ($env:ConnectionString) {
+            $connStrings = $webConfig.configuration.connectionStrings
+            if ($connStrings) {
+                $defaultConn = $connStrings.add | Where-Object { $_.name -eq "DefaultConnection" }
+                if ($defaultConn) {
+                    $defaultConn.connectionString = $env:ConnectionString
+                    Write-Host "  ✅ ConnectionString 'DefaultConnection' actualizado"
+                } else {
+                    # Agregar si no existe
+                    $newElement = $webConfig.CreateElement("add")
+                    $newElement.SetAttribute("name", "DefaultConnection")
+                    $newElement.SetAttribute("connectionString", $env:ConnectionString)
+                    $newElement.SetAttribute("providerName", "System.Data.SqlClient")
+                    $connStrings.AppendChild($newElement) | Out-Null
+                    Write-Host "  ✅ ConnectionString 'DefaultConnection' creado"
+                }
+            }
+        }
+        
+        # ---------------------------------------------------------------
+        # Transformar AppSettings
+        # ---------------------------------------------------------------
+        $appSettings = $webConfig.configuration.appSettings
+        if ($appSettings) {
+            # Inyectar Environment
+            $envSetting = $appSettings.add | Where-Object { $_.key -eq "Environment" }
+            if ($envSetting) {
+                $envSetting.value = "${{ parameters.environment }}"
+            } else {
+                $newElement = $webConfig.CreateElement("add")
+                $newElement.SetAttribute("key", "Environment")
+                $newElement.SetAttribute("value", "${{ parameters.environment }}")
+                $appSettings.AppendChild($newElement) | Out-Null
+            }
+            Write-Host "  ✅ AppSetting 'Environment' = ${{ parameters.environment }}"
+            
+            # Inyectar ApiKey si existe como variable
+            if ($env:ApiKey) {
+                $apiKeySetting = $appSettings.add | Where-Object { $_.key -eq "ApiKey" }
+                if ($apiKeySetting) {
+                    $apiKeySetting.value = $env:ApiKey
+                } else {
+                    $newElement = $webConfig.CreateElement("add")
+                    $newElement.SetAttribute("key", "ApiKey")
+                    $newElement.SetAttribute("value", $env:ApiKey)
+                    $appSettings.AppendChild($newElement) | Out-Null
+                }
+                Write-Host "  ✅ AppSetting 'ApiKey' inyectado"
+            }
+        }
+        
+        # ---------------------------------------------------------------
+        # Configurar customErrors según entorno
+        # ---------------------------------------------------------------
+        $systemWeb = $webConfig.configuration.'system.web'
+        if ($systemWeb) {
+            $customErrors = $systemWeb.customErrors
+            if ($customErrors) {
+                $mode = if ("${{ parameters.environment }}" -eq "Prod") { "RemoteOnly" } else { "Off" }
+                $customErrors.mode = $mode
+                Write-Host "  ✅ customErrors mode = $mode"
+            }
+        }
+        
+        # Guardar web.config transformado
+        $webConfig.Save($webConfigPath)
+        Write-Host ""
+        Write-Host "✅ web.config transformado y guardado"
+      displayName: '⚙️ Transformar web.config'
+      env:
+        ConnectionString: $(ConnectionString)
+        ApiKey: $(ApiKey)
+
+  # ---------------------------------------------------------------------------
+  # Paso 8: Verificar permisos del App Pool
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Import-Module WebAdministration -ErrorAction Stop
+      
+      $websiteName = "${{ parameters.websiteName }}"
+      $site = Get-Website -Name $websiteName
+      $appPool = $site.ApplicationPool
+      
+      # Verificar configuración del App Pool
+      $pool = Get-Item "IIS:\AppPools\$appPool"
+      Write-Host "App Pool: $appPool"
+      Write-Host "  Runtime:          $($pool.managedRuntimeVersion)"
+      Write-Host "  Pipeline Mode:    $($pool.managedPipelineMode)"
+      Write-Host "  Identity:         $($pool.processModel.identityType)"
+      Write-Host "  Start Mode:       $($pool.startMode)"
+      
+      # Asegurar que el runtime es correcto para .NET Framework
+      $expectedRuntime = "${{ parameters.managedRuntimeVersion }}"
+      if ($pool.managedRuntimeVersion -ne $expectedRuntime) {
+          Write-Host "  ⚠️ Ajustando runtime de $($pool.managedRuntimeVersion) a $expectedRuntime"
+          Set-ItemProperty "IIS:\AppPools\$appPool" -Name "managedRuntimeVersion" -Value $expectedRuntime
+      }
+    displayName: '🔧 Verificar configuración IIS App Pool'
+
+  # ---------------------------------------------------------------------------
+  # Paso 9: Iniciar sitio IIS
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Import-Module WebAdministration -ErrorAction Stop
+      
+      $websiteName = "${{ parameters.websiteName }}"
+      $site = Get-Website -Name $websiteName
+      $appPool = $site.ApplicationPool
+      
+      # Iniciar App Pool
+      if ((Get-WebAppPoolState -Name $appPool).Value -ne "Started") {
+          Start-WebAppPool -Name $appPool
+          Start-Sleep -Seconds 2
+          Write-Host "✅ App Pool '$appPool' iniciado"
+      }
+      
+      # Iniciar Website
+      Start-Website -Name $websiteName
+      Start-Sleep -Seconds 3
+      
+      $state = (Get-Website -Name $websiteName).State
+      if ($state -eq "Started") {
+          Write-Host "✅ Sitio IIS '$websiteName' iniciado"
+      } else {
+          throw "❌ No se pudo iniciar el sitio. Estado: $state"
+      }
+    displayName: '▶️ Iniciar sitio IIS'
+
+  # ---------------------------------------------------------------------------
+  # Paso 10: Health Check
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      $siteUrl = "${{ parameters.siteUrl }}"
+      $endpoint = "${{ parameters.healthCheckEndpoint }}"
+      $fullUrl = "${siteUrl}${endpoint}"
+      $timeout = ${{ parameters.healthCheckTimeout }}
+      $maxRetries = ${{ parameters.healthCheckRetries }}
+      $enableRollback = [System.Convert]::ToBoolean("${{ parameters.enableAutoRollback }}")
+      $lastBackup = "$(LastBackupPath)"
+      $deployPath = "${{ parameters.deployPath }}"
+      $websiteName = "${{ parameters.websiteName }}"
+      
+      Write-Host "============================================="
+      Write-Host "  HEALTH CHECK (.NET Framework)"
+      Write-Host "============================================="
+      Write-Host "URL: $fullUrl"
+      Write-Host "Timeout: ${timeout}s"
+      Write-Host ""
+      
+      # Esperar para inicio de la aplicación
+      Write-Host "Esperando 15 segundos para inicio de la aplicación .NET Framework..."
+      Start-Sleep -Seconds 15
+      
+      $success = $false
+      for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+              Write-Host "Intento $i de $maxRetries..."
+              
+              # Ignorar errores de certificado en entornos no-prod
+              if ("${{ parameters.environment }}" -ne "Prod") {
+                  [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+              }
+              
+              $response = Invoke-WebRequest -Uri $fullUrl -UseBasicParsing -TimeoutSec $timeout -ErrorAction Stop
+              
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Health check exitoso (HTTP $($response.StatusCode))"
+                  $success = $true
+                  break
+              } else {
+                  Write-Host "⚠️ HTTP $($response.StatusCode)"
+              }
+          } catch {
+              Write-Host "❌ Intento $i falló: $($_.Exception.Message)"
+              if ($i -lt $maxRetries) {
+                  Write-Host "Esperando 10 segundos..."
+                  Start-Sleep -Seconds 10
+              }
+          }
+      }
+      
+      if (-not $success) {
+          if ($enableRollback -and $lastBackup -and (Test-Path $lastBackup)) {
+              Write-Host ""
+              Write-Host "🔄 ROLLBACK AUTOMÁTICO"
+              
+              Import-Module WebAdministration
+              Stop-Website -Name $websiteName -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 3
+              
+              Get-ChildItem $deployPath -Recurse | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
+              
+              Start-Website -Name $websiteName
+              Start-Sleep -Seconds 5
+              
+              throw "Deploy falló — rollback ejecutado desde: $lastBackup"
+          } else {
+              throw "Deploy falló — health check no pasó. Rollback manual necesario."
+          }
+      }
+    displayName: '🏥 Health Check + Auto-Rollback'
+
+  # ---------------------------------------------------------------------------
+  # Paso 11: Resumen del Deploy
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  DEPLOY SUMMARY (.NET Framework)"
+      Write-Host "============================================="
+      Write-Host "Environment:     ${{ parameters.environment }}"
+      Write-Host "Website:         ${{ parameters.websiteName }}"
+      Write-Host "Deploy Path:     ${{ parameters.deployPath }}"
+      Write-Host "Site URL:        ${{ parameters.siteUrl }}"
+      Write-Host "Artifact:        ${{ parameters.artifactName }}"
+      Write-Host "Web Deploy:      ${{ parameters.useWebDeploy }}"
+      Write-Host "Build Number:    $(Build.BuildNumber)"
+      Write-Host "Deployed By:     $(Build.RequestedFor)"
+      Write-Host "Timestamp:       $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+      Write-Host "============================================="
+    displayName: '📋 Deploy Summary'
+    condition: succeededOrFailed()

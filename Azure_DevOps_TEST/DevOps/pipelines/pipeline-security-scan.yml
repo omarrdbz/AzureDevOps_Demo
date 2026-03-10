@@ -1,0 +1,450 @@
+# =============================================================================
+# Pipeline — Security Scan (SAST) Standalone
+# =============================================================================
+# Pipeline independiente que ejecuta solo los escaneos de seguridad.
+# Se puede ejecutar:
+#   - On-demand (manualmente)
+#   - Scheduled (ej: diariamente o semanalmente)
+#   - Como pipeline separado en PRs
+#
+# Incluye:
+#   - Microsoft Security DevOps (SAST)
+#   - Dependency Scan (NuGet vulnerabilities)
+#   - Credential Scan
+#   - Reporte consolidado
+#
+# Soporta tanto .NET Core como .NET Framework.
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nombre del pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+name: 'SecurityScan-$(Date:yyyyMMdd).$(Rev:r)'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers — Solo manual y scheduled
+# ─────────────────────────────────────────────────────────────────────────────
+trigger: none
+
+pr: none
+
+# Ejecución programada (opcional — descomentar para habilitar)
+schedules:
+  - cron: '0 6 * * 1'  # Lunes a las 6:00 AM UTC
+    displayName: 'Weekly Security Scan'
+    branches:
+      include:
+        - main
+    always: true  # Ejecutar incluso si no hay cambios
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parámetros (seleccionables al ejecutar manualmente)
+# ─────────────────────────────────────────────────────────────────────────────
+parameters:
+  # Tipo de proyecto
+  - name: projectType
+    displayName: 'Tipo de Proyecto'
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - netfx
+      - both
+
+  # Rama a escanear
+  - name: branch
+    displayName: 'Rama a escanear'
+    type: string
+    default: 'main'
+
+  # Nivel de severidad que causa fallo
+  - name: failOnSeverity
+    displayName: 'Fallar en severidad'
+    type: string
+    default: 'high'
+    values:
+      - critical
+      - high
+      - medium
+      - none  # No fallar, solo reportar
+
+  # Habilitar cada tipo de scan
+  - name: enableSAST
+    displayName: 'Habilitar SAST (Microsoft Security DevOps)'
+    type: boolean
+    default: true
+
+  - name: enableDependencyScan
+    displayName: 'Habilitar Dependency Scan'
+    type: boolean
+    default: true
+
+  - name: enableCredentialScan
+    displayName: 'Habilitar Credential Scan'
+    type: boolean
+    default: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  # .NET Core
+  dotnetVersion: '8.0.x'
+  projectPath: 'src/**/*.csproj'
+
+  # .NET Framework
+  solution: 'src/**/*.sln'
+  nugetVersion: '6.x'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stages
+# ─────────────────────────────────────────────────────────────────────────────
+stages:
+  # =========================================================================
+  # STAGE: SAST — Microsoft Security DevOps
+  # =========================================================================
+  - ${{ if eq(parameters.enableSAST, true) }}:
+    - stage: SAST
+      displayName: '🔒 SAST — Static Analysis'
+      jobs:
+        - job: SecurityDevOps
+          displayName: 'Microsoft Security DevOps'
+          pool:
+            vmImage: 'windows-latest'
+          timeoutInMinutes: 60
+
+          steps:
+            - checkout: self
+              fetchDepth: 0  # Full clone para análisis completo
+
+            - task: MicrosoftSecurityDevOps@1
+              displayName: 'Run Microsoft Security DevOps'
+              inputs:
+                categories: 'code,artifacts,IaC'
+                # Herramientas incluidas:
+                #   - Credential Scanner (detecta secretos en código)
+                #   - BinSkim (análisis de binarios)
+                #   - Template Analyzer (ARM/Bicep templates)
+                #   - ESLint (si hay JavaScript)
+                #   - Bandit (si hay Python)
+              continueOnError: ${{ ne(parameters.failOnSeverity, 'none') }}
+
+            # Publicar resultados SARIF
+            - task: PublishBuildArtifacts@1
+              displayName: 'Publicar resultados SARIF'
+              inputs:
+                PathtoPublish: '$(Agent.TempDirectory)/.gdn'
+                ArtifactName: 'sast-results'
+              condition: always()
+
+  # =========================================================================
+  # STAGE: Dependency Scan — .NET Core
+  # =========================================================================
+  - ${{ if and(eq(parameters.enableDependencyScan, true), or(eq(parameters.projectType, 'dotnet'), eq(parameters.projectType, 'both'))) }}:
+    - stage: DependencyScan_DotNet
+      displayName: '🔍 Dependency Scan — .NET Core'
+      ${{ if eq(parameters.enableSAST, true) }}:
+        dependsOn: SAST
+      condition: succeeded()
+      jobs:
+        - job: NuGetAudit
+          displayName: 'NuGet Vulnerability Audit (.NET Core)'
+          pool:
+            vmImage: 'windows-latest'
+          timeoutInMinutes: 30
+
+          steps:
+            - checkout: self
+
+            - task: UseDotNet@2
+              displayName: 'Instalar .NET SDK'
+              inputs:
+                packageType: 'sdk'
+                version: $(dotnetVersion)
+
+            - task: DotNetCoreCLI@2
+              displayName: 'Restore packages'
+              inputs:
+                command: 'restore'
+                projects: $(projectPath)
+
+            # Listar paquetes vulnerables
+            - powershell: |
+                Write-Host "============================================="
+                Write-Host "  DEPENDENCY SCAN — .NET Core"
+                Write-Host "============================================="
+                
+                $projects = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter "*.csproj" -Recurse
+                $hasVulnerabilities = $false
+                $totalVulnerabilities = 0
+                $criticalCount = 0
+                $highCount = 0
+                
+                foreach ($project in $projects) {
+                    Write-Host ""
+                    Write-Host "Escaneando: $($project.Name)"
+                    Write-Host "─────────────────────────────────"
+                    
+                    $output = & dotnet list $project.FullName package --vulnerable --include-transitive 2>&1
+                    $outputStr = $output -join "`n"
+                    
+                    if ($outputStr -match "has the following vulnerable packages") {
+                        $hasVulnerabilities = $true
+                        Write-Host $outputStr
+                        
+                        # Contar severidades
+                        $criticalCount += ([regex]::Matches($outputStr, "Critical")).Count
+                        $highCount += ([regex]::Matches($outputStr, "High")).Count
+                        $totalVulnerabilities += ([regex]::Matches($outputStr, "\s+>")).Count
+                    } else {
+                        Write-Host "  ✅ Sin vulnerabilidades conocidas"
+                    }
+                }
+                
+                Write-Host ""
+                Write-Host "============================================="
+                Write-Host "  RESUMEN"
+                Write-Host "============================================="
+                Write-Host "Total vulnerabilidades: $totalVulnerabilities"
+                Write-Host "  Critical: $criticalCount"
+                Write-Host "  High:     $highCount"
+                
+                # Determinar si debe fallar
+                $failLevel = "${{ parameters.failOnSeverity }}"
+                $shouldFail = $false
+                
+                switch ($failLevel) {
+                    "critical" { $shouldFail = $criticalCount -gt 0 }
+                    "high"     { $shouldFail = ($criticalCount + $highCount) -gt 0 }
+                    "medium"   { $shouldFail = $hasVulnerabilities }
+                    "none"     { $shouldFail = $false }
+                }
+                
+                if ($shouldFail) {
+                    throw "❌ Se encontraron vulnerabilidades de severidad '$failLevel' o superior"
+                } elseif ($hasVulnerabilities) {
+                    Write-Host "⚠️ Vulnerabilidades encontradas pero no alcanzan nivel de bloqueo ($failLevel)"
+                } else {
+                    Write-Host "✅ Sin vulnerabilidades detectadas"
+                }
+              displayName: 'Análisis de vulnerabilidades NuGet'
+
+  # =========================================================================
+  # STAGE: Dependency Scan — .NET Framework
+  # =========================================================================
+  - ${{ if and(eq(parameters.enableDependencyScan, true), or(eq(parameters.projectType, 'netfx'), eq(parameters.projectType, 'both'))) }}:
+    - stage: DependencyScan_NetFx
+      displayName: '🔍 Dependency Scan — .NET Framework'
+      ${{ if eq(parameters.enableSAST, true) }}:
+        dependsOn: SAST
+      condition: succeeded()
+      jobs:
+        - job: NuGetAuditNetFx
+          displayName: 'NuGet Vulnerability Check (.NET Framework)'
+          pool:
+            vmImage: 'windows-latest'
+          timeoutInMinutes: 30
+
+          steps:
+            - checkout: self
+
+            - task: NuGetToolInstaller@1
+              displayName: 'Instalar NuGet'
+              inputs:
+                versionSpec: $(nugetVersion)
+
+            - task: NuGetCommand@2
+              displayName: 'Restore packages'
+              inputs:
+                command: 'restore'
+                restoreSolution: $(solution)
+
+            # Analizar packages.config y packages.lock.json
+            - powershell: |
+                Write-Host "============================================="
+                Write-Host "  DEPENDENCY SCAN — .NET Framework"
+                Write-Host "============================================="
+                
+                # Buscar archivos packages.config
+                $packageConfigs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter "packages.config" -Recurse
+                
+                if ($packageConfigs.Count -eq 0) {
+                    Write-Host "⚠️ No se encontraron archivos packages.config"
+                    Write-Host "Verificar si el proyecto usa PackageReference en .csproj"
+                    exit 0
+                }
+                
+                $allPackages = @()
+                
+                foreach ($config in $packageConfigs) {
+                    Write-Host ""
+                    Write-Host "Analizando: $($config.FullName)"
+                    [xml]$xml = Get-Content $config.FullName
+                    
+                    foreach ($package in $xml.packages.package) {
+                        $allPackages += [PSCustomObject]@{
+                            Id      = $package.id
+                            Version = $package.version
+                            Source  = $config.Directory.Name
+                        }
+                        Write-Host "  $($package.id) v$($package.version)"
+                    }
+                }
+                
+                Write-Host ""
+                Write-Host "Total paquetes encontrados: $($allPackages.Count)"
+                Write-Host ""
+                Write-Host "💡 Para un análisis más profundo de vulnerabilidades en .NET Framework,"
+                Write-Host "   considerar integrar herramientas como Snyk, WhiteSource, o"
+                Write-Host "   OWASP Dependency-Check como siguiente paso del roadmap."
+              displayName: 'Análisis de dependencias NuGet (.NET Framework)'
+
+  # =========================================================================
+  # STAGE: Credential Scan
+  # =========================================================================
+  - ${{ if eq(parameters.enableCredentialScan, true) }}:
+    - stage: CredentialScan
+      displayName: '🔑 Credential Scan'
+      dependsOn: []  # Ejecutar en paralelo con SAST
+      jobs:
+        - job: CredScan
+          displayName: 'Buscar secretos en código'
+          pool:
+            vmImage: 'windows-latest'
+          timeoutInMinutes: 30
+
+          steps:
+            - checkout: self
+              fetchDepth: 0
+
+            # Escaneo manual de patrones comunes de secretos
+            - powershell: |
+                Write-Host "============================================="
+                Write-Host "  CREDENTIAL SCAN"
+                Write-Host "============================================="
+                
+                $sourceDir = "$(Build.SourcesDirectory)"
+                $findings = @()
+                
+                # Patrones de secretos comunes
+                $patterns = @{
+                    "Connection String (password)" = "(?i)(password|pwd)\s*=\s*[^\s;]{3,}"
+                    "API Key"                       = "(?i)(api[_-]?key|apikey)\s*[:=]\s*['\`""]?[a-zA-Z0-9\-_]{10,}"
+                    "Bearer Token"                  = "(?i)bearer\s+[a-zA-Z0-9\-_\.]{20,}"
+                    "Private Key"                   = "-----BEGIN (RSA |EC )?PRIVATE KEY-----"
+                    "AWS Key"                       = "(?i)AKIA[0-9A-Z]{16}"
+                    "Azure Storage Key"             = "(?i)DefaultEndpointsProtocol=https;AccountName=.+;AccountKey=.+"
+                    "PAT Token"                     = "(?i)(personal.?access.?token|pat)\s*[:=]\s*[a-zA-Z0-9]{20,}"
+                }
+                
+                # Extensiones a escanear
+                $extensions = @("*.cs", "*.config", "*.json", "*.xml", "*.yml", "*.yaml",
+                                "*.ps1", "*.sh", "*.bat", "*.cmd", "*.env", "*.ini",
+                                "*.properties", "*.txt", "*.md")
+                
+                # Archivos/carpetas a excluir
+                $excludeDirs = @("node_modules", ".git", "bin", "obj", "packages", "TestResults")
+                
+                foreach ($ext in $extensions) {
+                    $files = Get-ChildItem -Path $sourceDir -Filter $ext -Recurse -File |
+                        Where-Object {
+                            $path = $_.FullName
+                            -not ($excludeDirs | Where-Object { $path -like "*\$_\*" })
+                        }
+                    
+                    foreach ($file in $files) {
+                        $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                        if (-not $content) { continue }
+                        
+                        foreach ($patternName in $patterns.Keys) {
+                            $matches = [regex]::Matches($content, $patterns[$patternName])
+                            foreach ($match in $matches) {
+                                # Calcular número de línea
+                                $linesBefore = ($content.Substring(0, $match.Index) -split "`n").Count
+                                
+                                $findings += [PSCustomObject]@{
+                                    Type    = $patternName
+                                    File    = $file.FullName.Replace($sourceDir, ".")
+                                    Line    = $linesBefore
+                                    Preview = $match.Value.Substring(0, [Math]::Min(50, $match.Value.Length)) + "..."
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Write-Host ""
+                if ($findings.Count -gt 0) {
+                    Write-Host "⚠️ Se encontraron $($findings.Count) posibles secretos:" -ForegroundColor Yellow
+                    Write-Host ""
+                    $findings | Format-Table Type, File, Line -AutoSize
+                    
+                    # Generar reporte
+                    $reportPath = "$(Build.ArtifactStagingDirectory)/credential-scan-report.json"
+                    $findings | ConvertTo-Json -Depth 3 | Set-Content $reportPath
+                    
+                    $failLevel = "${{ parameters.failOnSeverity }}"
+                    if ($failLevel -ne "none") {
+                        throw "❌ Posibles secretos detectados en el código. Revisar y remediar."
+                    } else {
+                        Write-Host "⚠️ Modo solo-reporte — no se bloquea el pipeline"
+                    }
+                } else {
+                    Write-Host "✅ No se detectaron secretos en el código"
+                }
+              displayName: 'Escanear secretos en código fuente'
+
+            - task: PublishBuildArtifacts@1
+              displayName: 'Publicar reporte de credenciales'
+              inputs:
+                PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+                ArtifactName: 'credential-scan-results'
+              condition: always()
+
+  # =========================================================================
+  # STAGE: Security Report — Resumen consolidado
+  # =========================================================================
+  - stage: SecurityReport
+    displayName: '📊 Security Report'
+    dependsOn:
+      - ${{ if eq(parameters.enableSAST, true) }}:
+        - SAST
+      - ${{ if and(eq(parameters.enableDependencyScan, true), or(eq(parameters.projectType, 'dotnet'), eq(parameters.projectType, 'both'))) }}:
+        - DependencyScan_DotNet
+      - ${{ if and(eq(parameters.enableDependencyScan, true), or(eq(parameters.projectType, 'netfx'), eq(parameters.projectType, 'both'))) }}:
+        - DependencyScan_NetFx
+      - ${{ if eq(parameters.enableCredentialScan, true) }}:
+        - CredentialScan
+    condition: always()  # Ejecutar siempre para generar reporte
+
+    jobs:
+      - job: Report
+        displayName: 'Generar reporte consolidado'
+        pool:
+          vmImage: 'windows-latest'
+        timeoutInMinutes: 10
+
+        steps:
+          - powershell: |
+              Write-Host "╔═══════════════════════════════════════════════════════╗"
+              Write-Host "║           SECURITY SCAN REPORT — CONSOLIDADO         ║"
+              Write-Host "╠═══════════════════════════════════════════════════════╣"
+              Write-Host "║                                                       ║"
+              Write-Host "║  Timestamp:  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')           ║"
+              Write-Host "║  Branch:     $(Build.SourceBranchName)                ║"
+              Write-Host "║  Build:      $(Build.BuildNumber)                     ║"
+              Write-Host "║  Triggered:  $(Build.Reason)                          ║"
+              Write-Host "║                                                       ║"
+              Write-Host "║  Scans ejecutados:                                    ║"
+              Write-Host "║    SAST:              ${{ parameters.enableSAST }}               ║"
+              Write-Host "║    Dependency Scan:   ${{ parameters.enableDependencyScan }}     ║"
+              Write-Host "║    Credential Scan:   ${{ parameters.enableCredentialScan }}     ║"
+              Write-Host "║    Project Type:      ${{ parameters.projectType }}              ║"
+              Write-Host "║    Fail Severity:     ${{ parameters.failOnSeverity }}           ║"
+              Write-Host "║                                                       ║"
+              Write-Host "║  Resultados detallados disponibles en:                ║"
+              Write-Host "║    - Pestaña 'Scans' del pipeline run                ║"
+              Write-Host "║    - Artefactos: sast-results, credential-scan-results║"
+              Write-Host "║                                                       ║"
+              Write-Host "╚═══════════════════════════════════════════════════════╝"
+            displayName: '📊 Reporte Consolidado'

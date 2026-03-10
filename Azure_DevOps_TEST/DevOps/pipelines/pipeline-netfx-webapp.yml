@@ -1,0 +1,176 @@
+# =============================================================================
+# Pipeline Principal — .NET Framework 4.x Web Application (Legacy)
+# =============================================================================
+# Pipeline multi-stage completo para aplicaciones legacy:
+#   Stage 1: CI  — NuGet Restore, MSBuild, VSTest, SAST, Publish (MS-hosted)
+#   Stage 2: CD  — Deploy to Dev    (Self-hosted, sin aprobación)
+#   Stage 3: CD  — Deploy to Test   (Self-hosted, depende de Dev)
+#   Stage 4: CD  — Deploy to Prod   (Self-hosted, aprobación manual obligatoria)
+#
+# Diferencias vs pipeline-dotnet-webapp.yml:
+#   - Usa MSBuild (VSBuild@1) en lugar de dotnet CLI
+#   - Usa NuGet.exe para restore
+#   - Usa VSTest@2 para tests
+#   - Genera Web Deploy Package (.zip) como artefacto
+#   - Deploy con xcopy o Web Deploy (msdeploy.exe)
+#   - Transforma web.config (XML) en lugar de appsettings.json
+#   - Requiere windows-latest OBLIGATORIO como agente CI
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nombre del pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+name: '$(Date:yyyyMMdd).$(Rev:r)'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ─────────────────────────────────────────────────────────────────────────────
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - src/**
+    exclude:
+      - '**/*.md'
+      - 'docs/**'
+
+pr: none
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables Globales
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  # Configuración del proyecto .NET Framework
+  solution: 'src/MiAplicacion/MiAplicacion.sln'
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+  nugetVersion: '6.x'
+  artifactName: 'drop-netfx-$(Build.BuildNumber)'
+
+  # Nombre de la aplicación
+  appName: 'MiAplicacionLegacy'
+
+  # Deploy: usar Web Deploy (true) o xcopy (false)
+  # xcopy no requiere Web Deploy instalado en el servidor
+  useWebDeploy: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stages
+# ─────────────────────────────────────────────────────────────────────────────
+stages:
+  # =========================================================================
+  # STAGE 1: CI — NuGet Restore, MSBuild, VSTest, SAST, Publish
+  # =========================================================================
+  # OBLIGATORIO: windows-latest (MSBuild solo disponible en Windows)
+  # =========================================================================
+  - template: ../templates/stages-ci.yml
+    parameters:
+      stageName: 'CI'
+      stageDisplayName: '🔨 CI — Build, Test & Scan (.NET Framework)'
+      vmImage: 'windows-latest'
+      projectType: 'netfx'
+      solution: $(solution)
+      buildPlatform: $(buildPlatform)
+      buildConfiguration: $(buildConfiguration)
+      nugetVersion: $(nugetVersion)
+      artifactName: $(artifactName)
+      enableSAST: true
+      enableTests: true
+      generateWebDeployPackage: true
+      vsVersion: 'latest'
+      # Descomentar si se usa feed NuGet privado:
+      # nugetConfigPath: 'NuGet.config'
+
+  # =========================================================================
+  # STAGE 2: CD — Deploy to Dev
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Dev'
+      stageDisplayName: '🚀 CD — Deploy to Dev (.NET Framework)'
+      dependsOn:
+        - CI
+      condition: succeeded()
+      projectType: 'netfx'
+      environment: 'Dev'
+      pool: 'Pool-Dev'
+      variableGroup: 'vg-netfx-dev'
+      websiteName: '$(appName)-Dev'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName)-dev.empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/'
+      healthCheckTimeout: 30
+      healthCheckRetries: 3
+      enableAutoRollback: true
+      maxBackups: 5
+      useWebDeploy: false
+      enableWebConfigTransform: true
+      managedRuntimeVersion: 'v4.0'
+
+  # =========================================================================
+  # STAGE 3: CD — Deploy to Test
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Test'
+      stageDisplayName: '🧪 CD — Deploy to Test (.NET Framework)'
+      dependsOn:
+        - CD_Dev
+      condition: succeeded()
+      projectType: 'netfx'
+      environment: 'Test'
+      pool: 'Pool-Test'
+      variableGroup: 'vg-netfx-test'
+      websiteName: '$(appName)-Test'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName)-test.empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/'
+      healthCheckTimeout: 30
+      healthCheckRetries: 3
+      enableAutoRollback: true
+      maxBackups: 5
+      useWebDeploy: false
+      enableWebConfigTransform: true
+      managedRuntimeVersion: 'v4.0'
+
+  # =========================================================================
+  # STAGE 4: CD — Deploy to Prod
+  # =========================================================================
+  # ⚠️ APROBACIÓN MANUAL OBLIGATORIA (configurar en Environment "Prod")
+  # ⚠️ Solo desde rama 'main'
+  # =========================================================================
+  - template: ../templates/stages-cd.yml
+    parameters:
+      stageName: 'CD_Prod'
+      stageDisplayName: '🏭 CD — Deploy to Prod (.NET Framework)'
+      dependsOn:
+        - CD_Test
+      condition: |
+        and(
+          succeeded(),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main')
+        )
+      projectType: 'netfx'
+      environment: 'Prod'
+      pool: 'Pool-Prod'
+      variableGroup: 'vg-netfx-prod'
+      websiteName: '$(appName)'
+      deployPath: 'C:\inetpub\wwwroot\$(appName)'
+      artifactName: $(artifactName)
+      siteUrl: 'https://$(appName).empresa.local'
+      backupPath: 'C:\deploy-backups\$(appName)'
+      healthCheckEndpoint: '/'
+      healthCheckTimeout: 60
+      healthCheckRetries: 5
+      enableAutoRollback: true
+      maxBackups: 10
+      useWebDeploy: false
+      enableWebConfigTransform: true
+      managedRuntimeVersion: 'v4.0'

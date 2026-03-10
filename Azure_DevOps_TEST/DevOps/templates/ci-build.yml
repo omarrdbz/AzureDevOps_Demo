@@ -1,0 +1,196 @@
+# =============================================================================
+# Template CI — .NET Core / .NET 5+ / .NET 6+ / .NET 7+ / .NET 8+
+# =============================================================================
+# Propósito: Compilar, probar, escanear seguridad y publicar artefacto inmutable.
+# Agente: Microsoft-hosted (efímero, sin acceso a secretos productivos).
+# Uso: Se invoca desde stages-ci.yml o directamente desde el pipeline principal.
+# =============================================================================
+
+parameters:
+  # Versión del SDK de .NET a usar (ej: '8.0.x', '6.0.x')
+  - name: dotnetVersion
+    type: string
+    default: '8.0.x'
+
+  # Ruta al proyecto o solución (relativa a la raíz del repo)
+  - name: projectPath
+    type: string
+    default: 'src/**/*.csproj'
+
+  # Ruta a los proyectos de test
+  - name: testProjectPath
+    type: string
+    default: 'src/**/*Tests*.csproj'
+
+  # Configuración de build (Release o Debug)
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+    values:
+      - Release
+      - Debug
+
+  # Nombre del artefacto publicado
+  - name: artifactName
+    type: string
+    default: 'drop'
+
+  # Habilitar SAST (Microsoft Security DevOps)
+  - name: enableSAST
+    type: boolean
+    default: true
+
+  # Habilitar escaneo de dependencias
+  - name: enableDependencyScan
+    type: boolean
+    default: true
+
+  # Habilitar ejecución de tests
+  - name: enableTests
+    type: boolean
+    default: true
+
+  # Runtime adicional para publicar (ej: 'win-x64', 'linux-x64')
+  - name: runtimeIdentifier
+    type: string
+    default: 'win-x64'
+
+  # Argumentos adicionales para dotnet publish
+  - name: publishArgs
+    type: string
+    default: ''
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Paso 1: Instalar SDK de .NET
+  # ---------------------------------------------------------------------------
+  - task: UseDotNet@2
+    displayName: '📦 Instalar .NET SDK ${{ parameters.dotnetVersion }}'
+    inputs:
+      packageType: 'sdk'
+      version: '${{ parameters.dotnetVersion }}'
+      installationPath: $(Agent.ToolsDirectory)/dotnet
+
+  # ---------------------------------------------------------------------------
+  # Paso 2: Restaurar dependencias NuGet
+  # ---------------------------------------------------------------------------
+  - task: DotNetCoreCLI@2
+    displayName: '📥 Restore — Restaurar paquetes NuGet'
+    inputs:
+      command: 'restore'
+      projects: '${{ parameters.projectPath }}'
+      feedsToUse: 'select'
+      # Si se usan feeds privados, cambiar a 'config' y especificar nugetConfigPath
+
+  # ---------------------------------------------------------------------------
+  # Paso 3: Compilar
+  # ---------------------------------------------------------------------------
+  - task: DotNetCoreCLI@2
+    displayName: '🔨 Build — Compilar solución'
+    inputs:
+      command: 'build'
+      projects: '${{ parameters.projectPath }}'
+      arguments: '--configuration ${{ parameters.buildConfiguration }} --no-restore'
+
+  # ---------------------------------------------------------------------------
+  # Paso 4: Ejecutar Tests
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableTests, true) }}:
+    - task: DotNetCoreCLI@2
+      displayName: '🧪 Test — Ejecutar pruebas unitarias'
+      inputs:
+        command: 'test'
+        projects: '${{ parameters.testProjectPath }}'
+        arguments: >-
+          --configuration ${{ parameters.buildConfiguration }}
+          --no-build
+          --logger trx
+          --collect:"XPlat Code Coverage"
+          --results-directory $(Agent.TempDirectory)/TestResults
+      continueOnError: false
+
+    # Publicar resultados de tests
+    - task: PublishTestResults@2
+      displayName: '📊 Publicar resultados de tests'
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: 'VSTest'
+        testResultsFiles: '$(Agent.TempDirectory)/TestResults/**/*.trx'
+        mergeTestResults: true
+        testRunTitle: 'Unit Tests — ${{ parameters.buildConfiguration }}'
+
+    # Publicar cobertura de código
+    - task: PublishCodeCoverageResults@2
+      displayName: '📈 Publicar cobertura de código'
+      condition: succeededOrFailed()
+      inputs:
+        summaryFileLocation: '$(Agent.TempDirectory)/TestResults/**/coverage.cobertura.xml'
+
+  # ---------------------------------------------------------------------------
+  # Paso 5: SAST — Microsoft Security DevOps
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableSAST, true) }}:
+    - task: MicrosoftSecurityDevOps@1
+      displayName: '🔒 SAST — Microsoft Security DevOps'
+      inputs:
+        categories: 'code'
+      continueOnError: false
+
+  # ---------------------------------------------------------------------------
+  # Paso 6: Escaneo de Dependencias
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableDependencyScan, true) }}:
+    - task: DotNetCoreCLI@2
+      displayName: '🔍 Dependency Scan — Verificar vulnerabilidades NuGet'
+      inputs:
+        command: 'custom'
+        custom: 'list'
+        arguments: 'package --vulnerable --include-transitive --format json'
+        projects: '${{ parameters.projectPath }}'
+      continueOnError: true
+
+  # ---------------------------------------------------------------------------
+  # Paso 7: Publicar aplicación
+  # ---------------------------------------------------------------------------
+  - task: DotNetCoreCLI@2
+    displayName: '📦 Publish — Generar paquete de despliegue'
+    inputs:
+      command: 'publish'
+      projects: '${{ parameters.projectPath }}'
+      arguments: >-
+        --configuration ${{ parameters.buildConfiguration }}
+        --runtime ${{ parameters.runtimeIdentifier }}
+        --self-contained false
+        --output $(Build.ArtifactStagingDirectory)/publish
+        ${{ parameters.publishArgs }}
+      zipAfterPublish: true
+      modifyOutputPath: true
+
+  # ---------------------------------------------------------------------------
+  # Paso 8: Publicar Artefacto Versionado
+  # ---------------------------------------------------------------------------
+  - task: PublishPipelineArtifact@1
+    displayName: '📤 Publicar artefacto — ${{ parameters.artifactName }}'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/publish'
+      artifact: '${{ parameters.artifactName }}'
+      publishLocation: 'pipeline'
+
+  # ---------------------------------------------------------------------------
+  # Paso 9: Resumen del Build
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  BUILD SUMMARY"
+      Write-Host "============================================="
+      Write-Host "Build Number:    $(Build.BuildNumber)"
+      Write-Host "Branch:          $(Build.SourceBranchName)"
+      Write-Host "Commit:          $(Build.SourceVersion)"
+      Write-Host "Configuration:   ${{ parameters.buildConfiguration }}"
+      Write-Host ".NET Version:    ${{ parameters.dotnetVersion }}"
+      Write-Host "Artifact Name:   ${{ parameters.artifactName }}"
+      Write-Host "Runtime:         ${{ parameters.runtimeIdentifier }}"
+      Write-Host "SAST Enabled:    ${{ parameters.enableSAST }}"
+      Write-Host "Tests Enabled:   ${{ parameters.enableTests }}"
+      Write-Host "============================================="
+    displayName: '📋 Build Summary'

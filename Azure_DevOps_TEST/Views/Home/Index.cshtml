@@ -1,0 +1,130 @@
+﻿@model Azure_DevOps_TEST.Models.WeatherViewModel
+@{
+    ViewData["Title"] = "WeatherApp — Dashboard";
+}
+
+<div class="container">
+    <div class="text-center mb-4">
+        <h1 class="display-5">🌤️ WeatherApp</h1>
+        <p class="lead">Aplicación de clima para practicar Azure DevOps CI/CD</p>
+        <span class="badge bg-info">Entorno: @Model.Environment</span>
+    </div>
+
+    @if (!string.IsNullOrEmpty(Model.ErrorMessage))
+    {
+        <div class="alert alert-danger">
+            <strong>Error:</strong> @Model.ErrorMessage
+        </div>
+    }
+
+    <!-- Estado de Configuración / Secretos -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card @(Model.ApiKeyConfigured ? "border-success" : "border-warning")">
+                <div class="card-body">
+                    <h5 class="card-title">
+                        @(Model.ApiKeyConfigured ? "✅" : "⚠️") WeatherApi:ApiKey
+                    </h5>
+                    <p class="card-text">
+                        @if (Model.ApiKeyConfigured)
+                        {
+                            <span class="text-success">Configurada correctamente desde Variable Group</span>
+                        }
+                        else
+                        {
+                            <span class="text-warning">
+                                Usando valor local. Configure <code>WeatherApi__ApiKey</code> en el
+                                Variable Group de Azure DevOps.
+                            </span>
+                        }
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card @(Model.DatabaseConfigured ? "border-success" : "border-warning")">
+                <div class="card-body">
+                    <h5 class="card-title">
+                        @(Model.DatabaseConfigured ? "✅" : "⚠️") ConnectionStrings:WeatherDb
+                    </h5>
+                    <p class="card-text">
+                        @if (Model.DatabaseConfigured)
+                        {
+                            <span class="text-success">Configurada correctamente desde Variable Group</span>
+                        }
+                        else
+                        {
+                            <span class="text-warning">
+                                Usando valor local. Configure <code>ConnectionStrings__WeatherDb</code>
+                                en el Variable Group de Azure DevOps.
+                            </span>
+                        }
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Buscar Ciudad -->
+    <div class="row mb-4">
+        <div class="col-md-6 mx-auto">
+            <form method="get" class="input-group">
+                <input type="text" name="city" class="form-control" placeholder="Buscar ciudad..."
+                       value="@Model.CurrentWeather?.City" />
+                <button type="submit" class="btn btn-primary">🔍 Buscar</button>
+            </form>
+        </div>
+    </div>
+
+    @if (Model.CurrentWeather != null)
+    {
+        <!-- Clima Actual -->
+        <div class="row mb-4">
+            <div class="col-md-8 mx-auto">
+                <div class="card bg-primary text-white">
+                    <div class="card-body text-center">
+                        <h2>@Model.CurrentWeather.City</h2>
+                        <div class="display-1">@Model.CurrentWeather.Icon</div>
+                        <div class="display-4">@Model.CurrentWeather.TemperatureCelsius °C</div>
+                        <p class="lead">@Model.CurrentWeather.Description</p>
+                        <div class="row mt-3">
+                            <div class="col">
+                                💧 Humedad: @Model.CurrentWeather.Humidity%
+                            </div>
+                            <div class="col">
+                                💨 Viento: @Model.CurrentWeather.WindSpeedKmh km/h
+                            </div>
+                            <div class="col">
+                                🌡️ @Model.CurrentWeather.TemperatureFahrenheit.ToString("F1") °F
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pronóstico -->
+        @if (Model.Forecast.Count > 0)
+        {
+            <h3 class="text-center mb-3">Pronóstico próximos días</h3>
+            <div class="row">
+                @foreach (var day in Model.Forecast)
+                {
+                    <div class="col-md">
+                        <div class="card text-center mb-3">
+                            <div class="card-body">
+                                <h6>@day.Date.ToString("ddd dd/MM")</h6>
+                                <div class="fs-1">@day.Icon</div>
+                                <h5>@day.TemperatureCelsius °C</h5>
+                                <small class="text-muted">@day.Description</small>
+                                <div class="mt-2">
+                                    <small>💧 @day.Humidity%</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    }
+</div>

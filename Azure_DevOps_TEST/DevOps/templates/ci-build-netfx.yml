@@ -1,0 +1,228 @@
+# =============================================================================
+# Template CI — .NET Framework 4.x (Legacy)
+# =============================================================================
+# Propósito: Compilar con MSBuild, probar con VSTest, escanear seguridad y
+#            publicar artefacto inmutable (Web Deploy Package o carpeta).
+# Agente: Microsoft-hosted Windows (windows-latest) — OBLIGATORIO para MSBuild.
+# Uso: Se invoca desde stages-ci.yml o directamente desde el pipeline principal.
+# =============================================================================
+
+parameters:
+  # Ruta al archivo .sln
+  - name: solution
+    type: string
+    default: '**/*.sln'
+
+  # Plataforma de compilación
+  - name: buildPlatform
+    type: string
+    default: 'Any CPU'
+
+  # Configuración de compilación
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+    values:
+      - Release
+      - Debug
+
+  # Versión de NuGet a instalar
+  - name: nugetVersion
+    type: string
+    default: '6.x'
+
+  # Nombre del artefacto publicado
+  - name: artifactName
+    type: string
+    default: 'drop-netfx'
+
+  # Habilitar SAST (Microsoft Security DevOps)
+  - name: enableSAST
+    type: boolean
+    default: true
+
+  # Habilitar ejecución de tests
+  - name: enableTests
+    type: boolean
+    default: true
+
+  # Patrón de búsqueda para assemblies de test
+  - name: testAssemblyPattern
+    type: string
+    default: |
+      **\*Tests*.dll
+      **\*Test*.dll
+      !**\*TestAdapter*.dll
+      !**\obj\**
+
+  # Generar Web Deploy Package (true) o carpeta publicada (false)
+  - name: generateWebDeployPackage
+    type: boolean
+    default: true
+
+  # Argumentos adicionales de MSBuild
+  - name: additionalMsbuildArgs
+    type: string
+    default: ''
+
+  # Usar NuGet.config personalizado (ruta relativa al repo)
+  - name: nugetConfigPath
+    type: string
+    default: ''
+
+  # Versión de Visual Studio (para MSBuild)
+  - name: vsVersion
+    type: string
+    default: 'latest'
+    values:
+      - latest
+      - '17.0'
+      - '16.0'
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Paso 1: Instalar NuGet
+  # ---------------------------------------------------------------------------
+  - task: NuGetToolInstaller@1
+    displayName: '📦 Instalar NuGet ${{ parameters.nugetVersion }}'
+    inputs:
+      versionSpec: '${{ parameters.nugetVersion }}'
+      checkLatest: true
+
+  # ---------------------------------------------------------------------------
+  # Paso 2: Restaurar paquetes NuGet
+  # ---------------------------------------------------------------------------
+  # Opción A: Con NuGet.config personalizado
+  - ${{ if ne(parameters.nugetConfigPath, '') }}:
+    - task: NuGetCommand@2
+      displayName: '📥 NuGet Restore (con config personalizado)'
+      inputs:
+        command: 'restore'
+        restoreSolution: '${{ parameters.solution }}'
+        feedsToUse: 'config'
+        nugetConfigPath: '${{ parameters.nugetConfigPath }}'
+
+  # Opción B: Con feeds predeterminados
+  - ${{ if eq(parameters.nugetConfigPath, '') }}:
+    - task: NuGetCommand@2
+      displayName: '📥 NuGet Restore'
+      inputs:
+        command: 'restore'
+        restoreSolution: '${{ parameters.solution }}'
+        feedsToUse: 'select'
+
+  # ---------------------------------------------------------------------------
+  # Paso 3: Compilar con MSBuild (VSBuild)
+  # ---------------------------------------------------------------------------
+  # Con Web Deploy Package
+  - ${{ if eq(parameters.generateWebDeployPackage, true) }}:
+    - task: VSBuild@1
+      displayName: '🔨 MSBuild — Compilar + Web Deploy Package'
+      inputs:
+        solution: '${{ parameters.solution }}'
+        platform: '${{ parameters.buildPlatform }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+        vsVersion: '${{ parameters.vsVersion }}'
+        msbuildArgs: >-
+          /p:DeployOnBuild=true
+          /p:WebPublishMethod=Package
+          /p:PackageAsSingleFile=true
+          /p:SkipInvalidConfigurations=true
+          /p:PackageLocation="$(Build.ArtifactStagingDirectory)\WebDeployPackage"
+          ${{ parameters.additionalMsbuildArgs }}
+        clean: true
+        maximumCpuCount: true
+
+  # Sin Web Deploy Package (solo compilar)
+  - ${{ if eq(parameters.generateWebDeployPackage, false) }}:
+    - task: VSBuild@1
+      displayName: '🔨 MSBuild — Compilar solución'
+      inputs:
+        solution: '${{ parameters.solution }}'
+        platform: '${{ parameters.buildPlatform }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+        vsVersion: '${{ parameters.vsVersion }}'
+        msbuildArgs: >-
+          /p:OutDir=$(Build.ArtifactStagingDirectory)\publish\
+          /p:SkipInvalidConfigurations=true
+          ${{ parameters.additionalMsbuildArgs }}
+        clean: true
+        maximumCpuCount: true
+
+  # ---------------------------------------------------------------------------
+  # Paso 4: Ejecutar Tests con VSTest
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableTests, true) }}:
+    - task: VSTest@2
+      displayName: '🧪 VSTest — Ejecutar pruebas unitarias'
+      inputs:
+        testSelector: 'testAssemblies'
+        testAssemblyVer2: '${{ parameters.testAssemblyPattern }}'
+        searchFolder: '$(System.DefaultWorkingDirectory)'
+        platform: '${{ parameters.buildPlatform }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+        codeCoverageEnabled: true
+        runSettingsFile: ''
+        resultsFolder: '$(Agent.TempDirectory)\TestResults'
+      continueOnError: false
+
+  # ---------------------------------------------------------------------------
+  # Paso 5: SAST — Microsoft Security DevOps
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.enableSAST, true) }}:
+    - task: MicrosoftSecurityDevOps@1
+      displayName: '🔒 SAST — Microsoft Security DevOps'
+      inputs:
+        categories: 'code'
+      continueOnError: false
+
+  # ---------------------------------------------------------------------------
+  # Paso 6: Copiar archivos adicionales al artefacto (si no se usa Web Deploy)
+  # ---------------------------------------------------------------------------
+  - ${{ if eq(parameters.generateWebDeployPackage, false) }}:
+    - task: CopyFiles@2
+      displayName: '📋 Copiar web.config y archivos de configuración'
+      inputs:
+        Contents: |
+          **\web.config
+          **\Web.Release.config
+          **\Web.Debug.config
+          **\*.config
+        TargetFolder: '$(Build.ArtifactStagingDirectory)\publish'
+        flattenFolders: false
+
+  # ---------------------------------------------------------------------------
+  # Paso 7: Publicar Artefacto Versionado
+  # ---------------------------------------------------------------------------
+  - task: PublishPipelineArtifact@1
+    displayName: '📤 Publicar artefacto — ${{ parameters.artifactName }}'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)'
+      artifact: '${{ parameters.artifactName }}'
+      publishLocation: 'pipeline'
+
+  # ---------------------------------------------------------------------------
+  # Paso 8: Resumen del Build
+  # ---------------------------------------------------------------------------
+  - powershell: |
+      Write-Host "============================================="
+      Write-Host "  BUILD SUMMARY (.NET Framework)"
+      Write-Host "============================================="
+      Write-Host "Build Number:       $(Build.BuildNumber)"
+      Write-Host "Branch:             $(Build.SourceBranchName)"
+      Write-Host "Commit:             $(Build.SourceVersion)"
+      Write-Host "Solution:           ${{ parameters.solution }}"
+      Write-Host "Configuration:      ${{ parameters.buildConfiguration }}"
+      Write-Host "Platform:           ${{ parameters.buildPlatform }}"
+      Write-Host "Web Deploy Package: ${{ parameters.generateWebDeployPackage }}"
+      Write-Host "Artifact Name:      ${{ parameters.artifactName }}"
+      Write-Host "SAST Enabled:       ${{ parameters.enableSAST }}"
+      Write-Host "Tests Enabled:      ${{ parameters.enableTests }}"
+      Write-Host "============================================="
+      
+      # Listar artefactos generados
+      Write-Host "`nArchivos en ArtifactStagingDirectory:"
+      Get-ChildItem -Path "$(Build.ArtifactStagingDirectory)" -Recurse |
+        Select-Object FullName, Length |
+        Format-Table -AutoSize
+    displayName: '📋 Build Summary'

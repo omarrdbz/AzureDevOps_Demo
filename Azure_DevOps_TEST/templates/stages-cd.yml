@@ -1,0 +1,57 @@
+# Stage wrapper para CD
+# Encapsula el template CD con environment, approval y dependsOn
+# Referencia: Manual Azure DevOps — Apéndice A
+
+parameters:
+  - name: environment
+    type: string
+  - name: pool
+    type: string
+  - name: websiteName
+    type: string
+  - name: deployPath
+    type: string
+  - name: variableGroup
+    type: string
+  - name: artifactName
+    type: string
+    default: 'WeatherApp'
+  - name: siteUrl
+    type: string
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\WeatherApp'
+  - name: dependsOn
+    type: string
+    default: 'CI'
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+stages:
+  - stage: CD_${{ parameters.environment }}
+    displayName: 'CD — Deploy to ${{ parameters.environment }}'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    variables:
+      - group: ${{ parameters.variableGroup }}
+    pool:
+      name: ${{ parameters.pool }}
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy to ${{ parameters.environment }}'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: cd-deploy-iis.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    pool: ${{ parameters.pool }}
+                    websiteName: ${{ parameters.websiteName }}
+                    deployPath: ${{ parameters.deployPath }}
+                    variableGroup: ${{ parameters.variableGroup }}
+                    artifactName: ${{ parameters.artifactName }}
+                    siteUrl: ${{ parameters.siteUrl }}
+                    backupPath: ${{ parameters.backupPath }}

@@ -1,0 +1,237 @@
+# =============================================================================
+# Template Stage CD — Wrapper para ejecutar templates CD (Deploy a IIS)
+# =============================================================================
+# Propósito: Encapsular la lógica de CD en un stage reutilizable que configura
+#            el agente self-hosted, environment con aprobaciones, variable groups,
+#            dependencias entre stages y el template CD apropiado.
+# Uso: Se invoca desde el pipeline principal.
+#
+# Permite seleccionar entre:
+#   - cd-deploy-iis.yml          (.NET Core / .NET 5+)
+#   - cd-deploy-iis-netfx.yml    (.NET Framework 4.x)
+# =============================================================================
+
+parameters:
+  # ---------------------------------------------------------------------------
+  # Parámetros del Stage
+  # ---------------------------------------------------------------------------
+  - name: stageName
+    type: string
+
+  - name: stageDisplayName
+    type: string
+
+  # Stage(s) del que depende este stage
+  - name: dependsOn
+    type: object
+    default: []
+
+  # Condición para ejecutar (ej: solo si el stage anterior fue exitoso)
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+  # Tipo de proyecto: 'dotnet' o 'netfx'
+  - name: projectType
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - netfx
+
+  # ---------------------------------------------------------------------------
+  # Parámetros del Environment y Agent
+  # ---------------------------------------------------------------------------
+
+  # Environment de Azure DevOps (Dev, Test, Prod) — controla aprobaciones
+  - name: environment
+    type: string
+
+  # Agent Pool self-hosted
+  - name: pool
+    type: string
+
+  # Variable Group a vincular
+  - name: variableGroup
+    type: string
+
+  # ---------------------------------------------------------------------------
+  # Parámetros del Deploy
+  # ---------------------------------------------------------------------------
+  - name: websiteName
+    type: string
+
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\MiAplicacion'
+
+  - name: artifactName
+    type: string
+    default: 'drop'
+
+  - name: pipelineResource
+    type: string
+    default: 'current'
+
+  - name: siteUrl
+    type: string
+
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\MiAplicacion'
+
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+
+  - name: healthCheckTimeout
+    type: number
+    default: 30
+
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  - name: maxBackups
+    type: number
+    default: 5
+
+  # ---------------------------------------------------------------------------
+  # Parámetros específicos de .NET Core
+  # ---------------------------------------------------------------------------
+  - name: enableConfigTransform
+    type: boolean
+    default: true
+
+  # ---------------------------------------------------------------------------
+  # Parámetros específicos de .NET Framework
+  # ---------------------------------------------------------------------------
+  - name: useWebDeploy
+    type: boolean
+    default: false
+
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  - name: enableWebConfigTransform
+    type: boolean
+    default: true
+
+  - name: managedRuntimeVersion
+    type: string
+    default: 'v4.0'
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: '${{ parameters.stageDisplayName }}'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+
+    # Vincular Variable Group al stage
+    variables:
+      - group: ${{ parameters.variableGroup }}
+
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy to ${{ parameters.environment }}'
+
+        # Environment — controla aprobaciones y checks configurados en Azure DevOps
+        environment: ${{ parameters.environment }}
+
+        # Agent Pool self-hosted
+        pool:
+          name: ${{ parameters.pool }}
+
+        # Timeout para el job (60 minutos)
+        timeoutInMinutes: 60
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # ===========================================================
+                # .NET Core / .NET 5+
+                # ===========================================================
+                - ${{ if eq(parameters.projectType, 'dotnet') }}:
+                  - template: cd-deploy-iis.yml
+                    parameters:
+                      environment: ${{ parameters.environment }}
+                      pool: ${{ parameters.pool }}
+                      websiteName: ${{ parameters.websiteName }}
+                      deployPath: ${{ parameters.deployPath }}
+                      variableGroup: ${{ parameters.variableGroup }}
+                      artifactName: ${{ parameters.artifactName }}
+                      pipelineResource: ${{ parameters.pipelineResource }}
+                      siteUrl: ${{ parameters.siteUrl }}
+                      backupPath: ${{ parameters.backupPath }}
+                      healthCheckEndpoint: ${{ parameters.healthCheckEndpoint }}
+                      healthCheckTimeout: ${{ parameters.healthCheckTimeout }}
+                      healthCheckRetries: ${{ parameters.healthCheckRetries }}
+                      enableAutoRollback: ${{ parameters.enableAutoRollback }}
+                      maxBackups: ${{ parameters.maxBackups }}
+                      enableConfigTransform: ${{ parameters.enableConfigTransform }}
+
+                # ===========================================================
+                # .NET Framework 4.x
+                # ===========================================================
+                - ${{ if eq(parameters.projectType, 'netfx') }}:
+                  - template: cd-deploy-iis-netfx.yml
+                    parameters:
+                      environment: ${{ parameters.environment }}
+                      pool: ${{ parameters.pool }}
+                      websiteName: ${{ parameters.websiteName }}
+                      deployPath: ${{ parameters.deployPath }}
+                      variableGroup: ${{ parameters.variableGroup }}
+                      artifactName: ${{ parameters.artifactName }}
+                      pipelineResource: ${{ parameters.pipelineResource }}
+                      siteUrl: ${{ parameters.siteUrl }}
+                      backupPath: ${{ parameters.backupPath }}
+                      healthCheckEndpoint: ${{ parameters.healthCheckEndpoint }}
+                      healthCheckTimeout: ${{ parameters.healthCheckTimeout }}
+                      healthCheckRetries: ${{ parameters.healthCheckRetries }}
+                      enableAutoRollback: ${{ parameters.enableAutoRollback }}
+                      maxBackups: ${{ parameters.maxBackups }}
+                      useWebDeploy: ${{ parameters.useWebDeploy }}
+                      msdeployPath: ${{ parameters.msdeployPath }}
+                      enableWebConfigTransform: ${{ parameters.enableWebConfigTransform }}
+                      managedRuntimeVersion: ${{ parameters.managedRuntimeVersion }}
+
+            # Acciones post-deploy (opcionales)
+            on:
+              failure:
+                steps:
+                  - powershell: |
+                      Write-Host "============================================="
+                      Write-Host "  ❌ DEPLOY FALLÓ — ${{ parameters.environment }}"
+                      Write-Host "============================================="
+                      Write-Host "Stage:       ${{ parameters.stageName }}"
+                      Write-Host "Environment: ${{ parameters.environment }}"
+                      Write-Host "Website:     ${{ parameters.websiteName }}"
+                      Write-Host "Build:       $(Build.BuildNumber)"
+                      Write-Host "Timestamp:   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                      Write-Host ""
+                      Write-Host "Acciones recomendadas:"
+                      Write-Host "  1. Revisar logs del pipeline"
+                      Write-Host "  2. Verificar estado del agente self-hosted"
+                      Write-Host "  3. Verificar logs IIS: C:\inetpub\logs\LogFiles"
+                      Write-Host "  4. Application Event Log del servidor"
+                      Write-Host "  5. Si es necesario, rollback manual (ver manual)"
+                      Write-Host "============================================="
+                    displayName: '❌ Deploy Failure Report'
+              success:
+                steps:
+                  - powershell: |
+                      Write-Host "============================================="
+                      Write-Host "  ✅ DEPLOY EXITOSO — ${{ parameters.environment }}"
+                      Write-Host "============================================="
+                      Write-Host "Website:     ${{ parameters.websiteName }}"
+                      Write-Host "URL:         ${{ parameters.siteUrl }}"
+                      Write-Host "Build:       $(Build.BuildNumber)"
+                      Write-Host "Timestamp:   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                      Write-Host "============================================="
+                    displayName: '✅ Deploy Success Report'
