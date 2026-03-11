@@ -420,8 +420,10 @@ Enter agent pool (press enter for default) > Pool-Dev
 Enter agent name (press enter for [hostname]) > agent-dev-01
 Enter work folder (press enter for _work) > [Enter]
 Enter run agent as service? (Y/N) (press enter for N) > Y
+Enter enable SERVICE_SID_TYPE_UNRESTRICTED for agent service (Y/N) (press enter for N) > Y
 Enter User account to use for the service (press enter for NT AUTHORITY\NETWORK SERVICE) > .\svc_ado_deploy
 Enter Password for the account .\svc_ado_deploy > ****
+Enter whether to prevent service starting immediately after configuration is finished? (Y/N) (press enter for N) > N
 ```
 
 **Parámetros críticos:**

@@ -33,7 +33,7 @@ pr: none
 # Agente: Microsoft-hosted (efímero)
 # ──────────────────────────────────────────────
 stages:
-  - template: templates/stages-ci.yml
+  - template: ../templates/stages-ci.yml
     parameters:
       buildConfiguration: 'Release'
       dotnetVersion: '10.x'
@@ -45,7 +45,7 @@ stages:
   # Agente: Self-hosted (Pool-Test)
   # Aprobación: Opcional
   # ──────────────────────────────────────────────
-  - template: templates/stages-cd.yml
+  - template: ../templates/stages-cd.yml
     parameters:
       environment: 'Test'
       pool: 'Pool-Test'
@@ -63,7 +63,7 @@ stages:
   # Aprobación: OBLIGATORIA (configurada en Environment "Prod")
   # Branch Control: Solo desde main
   # ──────────────────────────────────────────────
-  - template: templates/stages-cd.yml
+  - template: ../templates/stages-cd.yml
     parameters:
       environment: 'Prod'
       pool: 'Pool-Prod'
