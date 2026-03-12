@@ -2,7 +2,7 @@
 
 **Versión:** 1.0  
 **Fecha:** Marzo 2026  
-**Basado en:** Estándar Corporativo de Pipelines (especificaciones.md)  
+**Basado en:** Estándar de Pipelines (especificaciones.md)  
 **Enfoque:** On-Prem + IIS + .NET / .NET Framework + Control de Costos + Seguridad Baseline
 
 ---
@@ -38,7 +38,7 @@
 
 ### 1.1 Propósito
 
-Este manual guía paso a paso la configuración completa de Azure DevOps para un entorno corporativo con infraestructura On-Premises, aplicaciones .NET desplegadas en IIS, y un modelo CI/CD seguro, auditable y de bajo costo.
+Este manual guía paso a paso la configuración completa de Azure DevOps para un entorno con infraestructura On-Premises, aplicaciones .NET desplegadas en IIS, y un modelo CI/CD seguro, auditable y de bajo costo.
 
 ### 1.2 Principios Obligatorios
 
