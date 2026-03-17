@@ -342,43 +342,44 @@ Ejecutar en PowerShell (como administrador) en el servidor destino:
 $password = Read-Host -AsSecureString "Ingrese contraseña para svc_ado_deploy"
 New-LocalUser -Name "svc_ado_deploy" `
     -Password $password `
-    -Description "Cuenta de servicio para Azure DevOps Agent (solo deploy)" `
+    -Description "Cuenta de servicio para Azure DevOps Agent (deploy IIS via Web Deploy)" `
     -PasswordNeverExpires $true `
     -UserMayNotChangePassword $true
 
-# NO agregar al grupo Administrators
-# Solo agregar al grupo de usuarios locales
+# Solo grupo Users — NO Administrators
+# Con Web Deploy + WMSVC, la cuenta NO necesita ser admin local.
+# Los deploys se ejecutan vía delegación del Web Management Service.
 Add-LocalGroupMember -Group "Users" -Member "svc_ado_deploy"
 ```
 
 ### 6.3 Configurar Permisos de la Cuenta de Servicio
 
+La cuenta de servicio usa **Web Deploy** (msdeploy.exe) vía el **Web Management Service (WMSVC)** para desplegar. Esto elimina la necesidad de admin local. Los permisos necesarios son:
+
+1. **Permisos NTFS con herencia** — sobre las carpetas padre, heredados a todas las apps
+2. **Delegación de Web Deploy** — configurada en WMSVC por sitio IIS
+
 ```powershell
-# Permisos sobre la carpeta de deploy IIS
-$deployPath = "C:\inetpub\wwwroot\MiAplicacion"
-$acl = Get-Acl $deployPath
-$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    "svc_ado_deploy", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"
-)
-$acl.SetAccessRule($rule)
-Set-Acl $deployPath $acl
+# Permisos NTFS con herencia (cubre todas las apps presentes y futuras)
+icacls "C:\inetpub\wwwroot" /grant "svc_ado_deploy:(OI)(CI)M" /T
+icacls "C:\deploy-backups"  /grant "svc_ado_deploy:(OI)(CI)M" /T
+icacls "C:\agent"            /grant "svc_ado_deploy:(OI)(CI)F" /T
 
-# Permisos sobre IIS (requiere módulo WebAdministration)
-Import-Module WebAdministration
-
-# Dar permiso de Log On as a Service (necesario para ejecutar el agente como servicio)
-# Esto se configura automáticamente al instalar el agente como servicio
+# La delegación de Web Deploy se configura en WMSVC.
+# Ver: DevOps/guia-web-deploy-iis.md — Secciones 4 y 5
 ```
 
 **Permisos específicos requeridos para `svc_ado_deploy`:**
 
-| Recurso | Permiso | Notas |
-|---|---|---|
-| `C:\inetpub\wwwroot\<app>` | Modify | Carpeta de la aplicación |
-| `web.config` | Modify | Para inyección de configuración |
-| IIS Website (Stop/Start) | Operador | Vía módulo `WebAdministration` |
-| `C:\agent` | Full Control | Carpeta del agente |
-| `C:\deploy-backups` | Modify | Carpeta de backups pre-deploy |
+| Recurso | Permiso | Método | Admin requerido |
+|---|---|---|---|
+| `C:\inetpub\wwwroot` | Modify (heredado) | `icacls (OI)(CI)M` | Solo al configurar |
+| `C:\deploy-backups` | Modify (heredado) | `icacls (OI)(CI)M` | Solo al configurar |
+| `C:\agent` | Full Control | `icacls (OI)(CI)F` | Solo al configurar |
+| IIS Sites (Stop/Start/Deploy) | Delegado via WMSVC | Web Deploy Delegation Rules | Solo al configurar |
+| Grupo `Administrators` | ❌ NO requerido | — | — |
+
+> 📋 **Guía completa:** Para la configuración detallada de Web Deploy, WMSVC, delegación por sitio, y scripts de bootstrap, ver **DevOps/guia-web-deploy-iis.md**.
 
 ### 6.4 Descargar e Instalar el Agente
 
@@ -1081,23 +1082,32 @@ Los resultados se publican como **SARIF** en la pestaña **"Scans"** del pipelin
 
 ## 15. IIS — Preparación del Servidor Destino
 
-### 15.1 Habilitar IIS y ASP.NET
+### 15.1 Habilitar IIS, ASP.NET y Web Deploy
+
+> 📋 **Guía completa:** Para la instalación detallada paso a paso, incluyendo Web Deploy, WMSVC y scripts de bootstrap, ver **DevOps/guia-web-deploy-iis.md**.
 
 ```powershell
 # En el servidor destino (PowerShell como administrador)
 
-# Instalar IIS + features necesarias
-Install-WindowsFeature -Name Web-Server -IncludeManagementTools
-Install-WindowsFeature -Name Web-Asp-Net45
-Install-WindowsFeature -Name Web-Net-Ext45
-Install-WindowsFeature -Name Web-ISAPI-Ext
-Install-WindowsFeature -Name Web-ISAPI-Filter
-Install-WindowsFeature -Name Web-Mgmt-Console
-Install-WindowsFeature -Name Web-Mgmt-Service
+# Instalar IIS + features necesarias (incluyendo Management Service para Web Deploy)
+Install-WindowsFeature -Name @(
+    'Web-Server',
+    'Web-Asp-Net45',
+    'Web-Net-Ext45',
+    'Web-ISAPI-Ext',
+    'Web-ISAPI-Filter',
+    'Web-Mgmt-Console',
+    'Web-Mgmt-Service',         # ← Necesario para Web Deploy
+    'Web-Scripting-Tools'
+) -IncludeManagementTools
 
 # Para .NET Core: instalar el ASP.NET Core Hosting Bundle
 # Descargar desde: https://dotnet.microsoft.com/download/dotnet
 # Ejecutar: dotnet-hosting-X.X.X-win.exe
+
+# Instalar Web Deploy 3.6 (con TODAS las features)
+# Descargar desde: https://www.iis.net/downloads/microsoft/web-deploy
+# Instalar con: msiexec /i WebDeploy_amd64.msi ADDLOCAL=ALL /quiet
 
 # Verificar instalación
 Get-WindowsFeature Web-* | Where-Object Installed | Format-Table Name, InstallState
@@ -1443,9 +1453,10 @@ templates/
 │   Pasos: NuGet install → restore → MSBuild → VSTest → SAST → publish
 │
 ├── cd-deploy-iis.yml         # CD para .NET Core desplegado en IIS
-│   Parámetros: environment, pool, websiteName, deployPath, variableGroup, artifactName,
-│               siteUrl, backupPath
-│   Pasos: download → backup → stop IIS → deploy → config transform → start IIS → health check
+│   Parámetros: environment, pool, websiteName, appPoolName, deployPath, variableGroup,
+│               artifactName, siteUrl, httpPort, backupPath, useWebDeploy
+│   Modos: Web Deploy (msdeploy.exe via WMSVC, sin admin) | xcopy (con admin)
+│   Pasos: download → backup → verify site → deploy (msdeploy o xcopy) → config → health check
 │
 ├── cd-deploy-iis-netfx.yml   # CD para .NET Framework en IIS
 │   Parámetros: environment, pool, websiteName, deployPath, variableGroup, artifactName,

@@ -1,6 +1,7 @@
 # Stage wrapper para CD
 # Encapsula el template CD con environment, approval y dependsOn
 # Referencia: Manual Azure DevOps — Apéndice A
+#             Guía Web Deploy — guia-web-deploy-iis.md
 
 parameters:
   - name: environment
@@ -9,6 +10,9 @@ parameters:
     type: string
   - name: websiteName
     type: string
+  - name: appPoolName
+    type: string
+    default: ''
   - name: deployPath
     type: string
   - name: variableGroup
@@ -18,9 +22,15 @@ parameters:
     default: 'WeatherApp'
   - name: siteUrl
     type: string
+  - name: httpPort
+    type: number
+    default: 80
   - name: backupPath
     type: string
     default: 'C:\deploy-backups\WeatherApp'
+  - name: useWebDeploy
+    type: boolean
+    default: true
   - name: dependsOn
     type: string
     default: 'CI'
@@ -50,8 +60,11 @@ stages:
                     environment: ${{ parameters.environment }}
                     pool: ${{ parameters.pool }}
                     websiteName: ${{ parameters.websiteName }}
+                    appPoolName: ${{ parameters.appPoolName }}
                     deployPath: ${{ parameters.deployPath }}
                     variableGroup: ${{ parameters.variableGroup }}
                     artifactName: ${{ parameters.artifactName }}
                     siteUrl: ${{ parameters.siteUrl }}
+                    httpPort: ${{ parameters.httpPort }}
                     backupPath: ${{ parameters.backupPath }}
+                    useWebDeploy: ${{ parameters.useWebDeploy }}

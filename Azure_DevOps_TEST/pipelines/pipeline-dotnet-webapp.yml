@@ -1,6 +1,7 @@
 # Pipeline completo: CI + CD (Test → Prod)
 # Aplicación: WeatherApp (.NET 10)
 # Referencia: Manual Azure DevOps — Secciones 11, 12
+#             Guía Web Deploy — guia-web-deploy-iis.md
 #
 # SECRETOS REQUERIDOS EN VARIABLE GROUPS:
 #   vg-weatherapp-test / vg-weatherapp-prod
@@ -8,10 +9,8 @@
 #     - WeatherApi__ApiKey            🔒 (secreto)
 #     - WeatherApi__BaseUrl
 #     - WeatherApi__DefaultCity
-#     - AppPoolName
-#     - WebsiteName
-#     - DeployPath
-#     - SiteUrl
+#     - WebDeployUser                 (cuenta de servicio)
+#     - WebDeployPassword             🔒 (secreto)
 
 name: '$(Date:yyyyMMdd).$(Rev:r)'
 
@@ -43,23 +42,26 @@ stages:
   # ──────────────────────────────────────────────
   # STAGE 2: CD — Deploy to Test
   # Agente: Self-hosted (Pool-Test)
-  # Aprobación: Opcional
+  # Deploy: Web Deploy (msdeploy.exe via WMSVC)
   # ──────────────────────────────────────────────
   - template: ../templates/stages-cd.yml
     parameters:
       environment: 'Test'
       pool: 'Pool-Test'
       websiteName: 'WeatherApp-Test'
+      appPoolName: 'WeatherApp-Test-Pool'
       deployPath: 'C:\inetpub\wwwroot\WeatherApp'
       variableGroup: 'vg-weatherapp-test'
       artifactName: 'WeatherApp'
       siteUrl: 'https://weatherapp-test.empresa.local'
       backupPath: 'C:\deploy-backups\WeatherApp'
+      useWebDeploy: true
       dependsOn: 'CI'
 
   # ──────────────────────────────────────────────
   # STAGE 3: CD — Deploy to Prod
   # Agente: Self-hosted (Pool-Prod)
+  # Deploy: Web Deploy (msdeploy.exe via WMSVC)
   # Aprobación: OBLIGATORIA (configurada en Environment "Prod")
   # Branch Control: Solo desde main
   # ──────────────────────────────────────────────
@@ -68,10 +70,12 @@ stages:
       environment: 'Prod'
       pool: 'Pool-Prod'
       websiteName: 'WeatherApp-Prod'
+      appPoolName: 'WeatherApp-Prod-Pool'
       deployPath: 'C:\inetpub\wwwroot\WeatherApp'
       variableGroup: 'vg-weatherapp-prod'
       artifactName: 'WeatherApp'
       siteUrl: 'https://weatherapp.empresa.local'
       backupPath: 'C:\deploy-backups\WeatherApp'
+      useWebDeploy: true
       dependsOn: 'CD_Test'
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"

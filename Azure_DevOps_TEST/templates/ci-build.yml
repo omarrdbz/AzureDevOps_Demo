@@ -18,6 +18,12 @@ parameters:
 
 steps:
   - task: UseDotNet@2
+    displayName: 'Instalar .NET SDK 8.x (Para herramientas de seguridad MSDO)'
+    inputs:
+      packageType: 'sdk'
+      version: '8.x'
+
+  - task: UseDotNet@2
     displayName: 'Instalar .NET SDK ${{ parameters.dotnetVersion }}'
     inputs:
       packageType: 'sdk'
