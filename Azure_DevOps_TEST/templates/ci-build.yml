@@ -68,6 +68,8 @@ steps:
       projects: '${{ parameters.projectPath }}'
       arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)'
       publishWebProjects: false
+      zipAfterPublish: false
+      modifyOutputPath: false
 
   # Publicar artefacto versionado
   # Referencia: Manual — Principio 2 (Artefactos Inmutables)

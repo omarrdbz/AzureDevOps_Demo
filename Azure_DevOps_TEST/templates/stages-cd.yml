@@ -8,11 +8,6 @@ parameters:
     type: string
   - name: pool
     type: string
-  - name: websiteName
-    type: string
-  - name: appPoolName
-    type: string
-    default: ''
   - name: deployPath
     type: string
   - name: variableGroup
@@ -20,11 +15,6 @@ parameters:
   - name: artifactName
     type: string
     default: 'WeatherApp'
-  - name: siteUrl
-    type: string
-  - name: httpPort
-    type: number
-    default: 80
   - name: backupPath
     type: string
     default: 'C:\deploy-backups\WeatherApp'
@@ -59,12 +49,8 @@ stages:
                   parameters:
                     environment: ${{ parameters.environment }}
                     pool: ${{ parameters.pool }}
-                    websiteName: ${{ parameters.websiteName }}
-                    appPoolName: ${{ parameters.appPoolName }}
                     deployPath: ${{ parameters.deployPath }}
                     variableGroup: ${{ parameters.variableGroup }}
                     artifactName: ${{ parameters.artifactName }}
-                    siteUrl: ${{ parameters.siteUrl }}
-                    httpPort: ${{ parameters.httpPort }}
                     backupPath: ${{ parameters.backupPath }}
                     useWebDeploy: ${{ parameters.useWebDeploy }}

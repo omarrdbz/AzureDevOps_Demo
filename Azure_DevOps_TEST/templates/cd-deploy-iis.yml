@@ -15,11 +15,6 @@ parameters:
     type: string
   - name: pool
     type: string
-  - name: websiteName
-    type: string
-  - name: appPoolName
-    type: string
-    default: ''
   - name: deployPath
     type: string
   - name: variableGroup
@@ -27,11 +22,6 @@ parameters:
   - name: artifactName
     type: string
     default: 'WeatherApp'
-  - name: siteUrl
-    type: string
-  - name: httpPort
-    type: number
-    default: 80
   - name: backupPath
     type: string
     default: 'C:\deploy-backups\WeatherApp'
@@ -117,7 +107,7 @@ steps:
   # ---------------------------------------------------------------------------
   - powershell: |
       $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
-      $site   = "${{ parameters.websiteName }}"
+      $site   = "$(WebsiteName)"
 
       $exists = & $appcmd list site /name:"$site" 2>$null
       if ($exists) {
@@ -138,7 +128,7 @@ steps:
   - ${{ if eq(parameters.useWebDeploy, true) }}:
     - powershell: |
         $msdeployExe  = "${{ parameters.msdeployPath }}"
-        $site         = "${{ parameters.websiteName }}"
+        $site         = "$(WebsiteName)"
         $artifactPath = "$(Pipeline.Workspace)/${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)"
 
         # Verificar msdeploy existe
@@ -152,20 +142,22 @@ steps:
         Write-Host "  Sitio:     $site"
         Write-Host "  Artefacto: $artifactPath"
         Write-Host "  Modo:      WMSVC (sin admin local)"
-        Write-Host ""
+        Write-Host "============================================="
 
-        & $msdeployExe `
-            -verb:sync `
-            -source:contentPath="$artifactPath" `
-            -dest:contentPath="$site",`
-                  computerName="https://localhost:8172/msdeploy.axd",`
-                  userName="$(WebDeployUser)",`
-                  password="$(WebDeployPassword)",`
-                  authType="Basic" `
-            -enableRule:AppOffline `
-            -allowUntrusted `
-            -retryAttempts:2 `
-            -retryInterval:3000
+        # Construir los argumentos de forma segura para PowerShell
+        $msdeployArgs = @(
+            "-verb:sync",
+            "-source:contentPath=`"$artifactPath`"",
+            # AQUÍ ESTÁ LA CORRECCIÓN CLAVE: ?site=$site
+            "-dest:contentPath=`"$site`",computerName=`"https://localhost:8172/msdeploy.axd?site=$site`",userName=`"$env:WebDeployUser`",password=`"$env:WebDeployPassword`",authType=`"Basic`"",
+            "-enableRule:AppOffline",
+            "-allowUntrusted",
+            "-retryAttempts:2",
+            "-retryInterval:3000"
+        )
+
+        # Ejecutar el comando pasándole el arreglo de argumentos
+        & $msdeployExe $msdeployArgs
 
         if ($LASTEXITCODE -ne 0) {
             throw "Web Deploy falló con código de salida: $LASTEXITCODE"
@@ -185,7 +177,7 @@ steps:
     # Detener sitio IIS
     - powershell: |
         $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
-        $site   = "${{ parameters.websiteName }}"
+        $site   = "$(WebsiteName)"
 
         $exists = & $appcmd list site /name:"$site" 2>$null
         if ($exists) {
@@ -216,8 +208,8 @@ steps:
     # Iniciar sitio IIS
     - powershell: |
         $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
-        $site   = "${{ parameters.websiteName }}"
-        $pool   = "${{ parameters.appPoolName }}"
+        $site   = "$(WebsiteName)"
+        $pool   = "$(AppPoolName)"
 
         # Iniciar App Pool
         & $appcmd start apppool /apppool.name:"$pool" 2>$null
@@ -242,14 +234,14 @@ steps:
   # Paso 6: Health Check + Auto-Rollback
   # ---------------------------------------------------------------------------
   - powershell: |
-      $siteUrl        = "${{ parameters.siteUrl }}"
+      $siteUrl        = "$(SiteUrl)"
       $endpoint       = "${{ parameters.healthCheckEndpoint }}"
       $fullUrl        = "${siteUrl}${endpoint}"
       $maxRetries     = ${{ parameters.healthCheckRetries }}
       $enableRollback = [System.Convert]::ToBoolean("${{ parameters.enableAutoRollback }}")
       $lastBackup     = "$(LastBackupPath)"
       $deployPath     = "${{ parameters.deployPath }}"
-      $websiteName    = "${{ parameters.websiteName }}"
+      $websiteName    = "$(WebsiteName)"
 
       Write-Host "============================================="
       Write-Host "  HEALTH CHECK"
@@ -311,9 +303,9 @@ steps:
       Write-Host "  DEPLOY SUMMARY"
       Write-Host "============================================="
       Write-Host "Environment:     ${{ parameters.environment }}"
-      Write-Host "Website:         ${{ parameters.websiteName }}"
+      Write-Host "Website:         $(WebsiteName)"
       Write-Host "Deploy Path:     ${{ parameters.deployPath }}"
-      Write-Host "Site URL:        ${{ parameters.siteUrl }}"
+      Write-Host "Site URL:        $(SiteUrl)"
       Write-Host "Artifact:        ${{ parameters.artifactName }}"
       Write-Host "Web Deploy:      ${{ parameters.useWebDeploy }}"
       Write-Host "Build Number:    $(Build.BuildNumber)"

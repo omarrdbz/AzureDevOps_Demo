@@ -48,12 +48,9 @@ stages:
     parameters:
       environment: 'Test'
       pool: 'Pool-Test'
-      websiteName: 'WeatherApp-Test'
-      appPoolName: 'WeatherApp-Test-Pool'
       deployPath: 'C:\inetpub\wwwroot\WeatherApp'
       variableGroup: 'vg-weatherapp-test'
       artifactName: 'WeatherApp'
-      siteUrl: 'https://weatherapp-test.empresa.local'
       backupPath: 'C:\deploy-backups\WeatherApp'
       useWebDeploy: true
       dependsOn: 'CI'
@@ -69,12 +66,9 @@ stages:
     parameters:
       environment: 'Prod'
       pool: 'Pool-Prod'
-      websiteName: 'WeatherApp-Prod'
-      appPoolName: 'WeatherApp-Prod-Pool'
       deployPath: 'C:\inetpub\wwwroot\WeatherApp'
       variableGroup: 'vg-weatherapp-prod'
       artifactName: 'WeatherApp'
-      siteUrl: 'https://weatherapp.empresa.local'
       backupPath: 'C:\deploy-backups\WeatherApp'
       useWebDeploy: true
       dependsOn: 'CD_Test'
