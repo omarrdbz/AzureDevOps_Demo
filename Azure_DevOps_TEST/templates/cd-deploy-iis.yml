@@ -123,6 +123,7 @@ steps:
       if ($exists) {
           Write-Host "✅ Sitio '$site' encontrado en IIS"
           Write-Host "##vso[task.setvariable variable=SiteExists]true"
+          exit 0
       } else {
           Write-Host "##vso[task.logissue type=warning]Sitio '$site' no existe en IIS."
           Write-Host "Ejecutar bootstrap/setup-iis-server.ps1 como Admin."
