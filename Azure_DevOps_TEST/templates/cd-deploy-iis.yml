@@ -113,6 +113,7 @@ steps:
       if ($exists) {
           Write-Host "✅ Sitio '$site' encontrado en IIS"
           Write-Host "##vso[task.setvariable variable=SiteExists]true"
+          exit 0
       } else {
           Write-Host "##vso[task.logissue type=warning]Sitio '$site' no existe en IIS."
           Write-Host "Ejecutar bootstrap/setup-iis-server.ps1 como Admin."
@@ -148,7 +149,6 @@ steps:
         $msdeployArgs = @(
             "-verb:sync",
             "-source:contentPath=`"$artifactPath`"",
-            # AQUÍ ESTÁ LA CORRECCIÓN CLAVE: ?site=$site
             "-dest:contentPath=`"$site`",computerName=`"https://localhost:8172/msdeploy.axd?site=$site`",userName=`"$env:WebDeployUser`",password=`"$env:WebDeployPassword`",authType=`"Basic`"",
             "-enableRule:AppOffline",
             "-allowUntrusted",
