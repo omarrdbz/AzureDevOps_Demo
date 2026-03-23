@@ -153,18 +153,21 @@ steps:
         Write-Host "  Sitio:     $site"
         Write-Host "  Artefacto: $artifactPath"
         Write-Host "  Modo:      WMSVC (sin admin local)"
-        Write-Host ""
+        Write-Host "============================================="
 
-        $destArg = "contentPath='$site',computerName='https://localhost:8172/msdeploy.axd',userName='$env:WebDeployUser',password='$env:WebDeployPassword',authType='Basic'"
+        # Construir los argumentos de forma segura para PowerShell
+        $msdeployArgs = @(
+            "-verb:sync",
+            "-source:contentPath=`"$artifactPath`"",
+            "-dest:contentPath=`"$site`",computerName=`"https://localhost:8172/msdeploy.axd?site=$site`",userName=`"$env:WebDeployUser`",password=`"$env:WebDeployPassword`",authType=`"Basic`"",
+            "-enableRule:AppOffline",
+            "-allowUntrusted",
+            "-retryAttempts:2",
+            "-retryInterval:3000"
+        )
 
-        & $msdeployExe `
-          -verb:sync `
-          -source:contentPath="$artifactPath" `
-          -dest:$destArg `
-          -enableRule:AppOffline `
-          -allowUntrusted `
-          -retryAttempts:2 `
-          -retryInterval:3000
+        # Ejecutar el comando pasándole el arreglo de argumentos
+        & $msdeployExe $msdeployArgs
 
         if ($LASTEXITCODE -ne 0) {
             throw "Web Deploy falló con código de salida: $LASTEXITCODE"
