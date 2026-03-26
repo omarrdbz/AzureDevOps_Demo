@@ -1,0 +1,137 @@
+# =============================================================================
+# TEMPLATE: Stage CD — Wrapper para Deploy a IIS
+# =============================================================================
+# Capa:       Stage (intermedia — se invoca desde el pipeline principal)
+# Propósito:  Encapsular el template de steps CD con environment, approvals,
+#             variable group, pool self-hosted y dependencias entre stages
+# Agente:     Self-hosted (On-Prem, mismo servidor donde está IIS)
+#
+# Este stage:
+#   1. Ejecuta en un agente self-hosted dentro de la red corporativa
+#   2. Descarga el artefacto inmutable creado en CI
+#   3. Hace backup, despliega via Web Deploy y verifica salud de la app
+#
+# APROBACIONES:
+#   Las aprobaciones se configuran en Azure DevOps > Pipelines > Environments.
+#   No se configuran en YAML — se gestionan como "checks" del Environment.
+#   Recomendación: Test con aprobación opcional, Prod con aprobación obligatoria.
+#
+# USO:
+#   - template: templates/stage-cd.yml
+#     parameters:
+#       environment: 'Test'
+#       pool: 'Pool-Test'
+#       variableGroup: 'vg-miapp-test'
+#       artifactName: 'MiApp'
+#       deployPath: 'C:\inetpub\wwwroot\MiApp'
+#       backupPath: 'C:\deploy-backups\MiApp'
+# =============================================================================
+
+parameters:
+  # ─── Entorno y aprobaciones ───────────────────────────────────
+  - name: environment
+    type: string
+    # Nombre del Environment en Azure DevOps (ej: 'Test', 'Prod')
+    # Las aprobaciones se configuran en el Environment, no aquí.
+
+  # ─── Pool de agente self-hosted ───────────────────────────────
+  - name: pool
+    type: string
+    # Nombre del Agent Pool (ej: 'Pool-Test', 'Pool-Prod')
+
+  # ─── Variable Group ──────────────────────────────────────────
+  - name: variableGroup
+    type: string
+    # Nombre del Variable Group con los secretos del entorno
+    # Debe contener: WebsiteName, SiteUrl, WebDeployUser, WebDeployPassword
+
+  # ─── Artefacto ────────────────────────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  # ─── Rutas del servidor ───────────────────────────────────────
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\WebApp'
+
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\WebApp'
+
+  # ─── Web Deploy ──────────────────────────────────────────────
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  # ─── Health Check ────────────────────────────────────────────
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  - name: healthCheckDelaySeconds
+    type: number
+    default: 10
+
+  # ─── Rollback y retención ─────────────────────────────────────
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  - name: maxBackups
+    type: number
+    default: 5
+
+  # ─── Control de flujo entre stages ───────────────────────────
+  - name: dependsOn
+    type: string
+    default: 'CI'
+    # Stage del que depende este stage (ej: 'CI', 'CD_Test')
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+    # Condición para ejecutar este stage.
+    # Prod típicamente usa:
+    #   "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
+
+stages:
+  - stage: CD_${{ parameters.environment }}
+    displayName: 'CD — Deploy to ${{ parameters.environment }}'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+
+    # ─── Variables del entorno (secretos cifrados) ──────────────
+    variables:
+      - group: ${{ parameters.variableGroup }}
+
+    # ─── Pool self-hosted (On-Prem) ────────────────────────────
+    pool:
+      name: ${{ parameters.pool }}
+
+    jobs:
+      # Deployment job: registra el deploy en el Environment de Azure DevOps
+      # Esto habilita trazabilidad, historial y aprobaciones.
+      - deployment: Deploy
+        displayName: 'Deploy to ${{ parameters.environment }}'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: steps-cd-iis.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    artifactName: ${{ parameters.artifactName }}
+                    deployPath: ${{ parameters.deployPath }}
+                    backupPath: ${{ parameters.backupPath }}
+                    msdeployPath: ${{ parameters.msdeployPath }}
+                    healthCheckEndpoint: ${{ parameters.healthCheckEndpoint }}
+                    healthCheckRetries: ${{ parameters.healthCheckRetries }}
+                    healthCheckDelaySeconds: ${{ parameters.healthCheckDelaySeconds }}
+                    enableAutoRollback: ${{ parameters.enableAutoRollback }}
+                    maxBackups: ${{ parameters.maxBackups }}

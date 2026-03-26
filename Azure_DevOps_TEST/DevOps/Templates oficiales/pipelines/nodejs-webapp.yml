@@ -1,0 +1,95 @@
+# =============================================================================
+# PIPELINE EJEMPLO: Aplicación Web Node.js (CI + CD)
+# =============================================================================
+# Tecnología:  Node.js (React, Angular, Vue, Next.js, Express, etc.)
+# Flujo:       CI (Build) → CD Test → CD Prod
+# Agentes:     CI en Microsoft-hosted, CD en Self-hosted
+#
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  INSTRUCCIONES PARA ADAPTAR A TU PROYECTO:                              ║
+# ║                                                                          ║
+# ║  1. Copiar este archivo a tu carpeta pipelines/                          ║
+# ║  2. Reemplazar todos los valores marcados con <!-- CAMBIAR -->           ║
+# ║  3. Crear los Variable Groups en Azure DevOps Library                    ║
+# ║  4. Crear los Environments en Azure DevOps con las aprobaciones          ║
+# ║  5. Ajustar las rutas de templates según tu estructura de repo           ║
+# ║  6. Verificar que package.json tenga scripts "build" y "test"            ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
+# NOTA SOBRE NODE.JS + IIS:
+#   Para alojar apps Node.js en IIS se requiere iisnode o usar IIS como
+#   reverse proxy hacia un proceso Node.js gestionado por PM2 o similar.
+#   El deploy via Web Deploy funciona igual: sincroniza archivos al sitio IIS.
+#   La diferencia está en la configuración del sitio (web.config con handlers).
+#
+# VARIABLE GROUPS REQUERIDOS: (misma estructura que .NET)
+#   vg-miapp-test / vg-miapp-prod
+#     - WebsiteName, SiteUrl, WebDeployUser, WebDeployPassword 🔒
+#     - (Tus variables: NODE_ENV, API_URL, etc.)
+# =============================================================================
+
+name: '$(Date:yyyyMMdd).$(Rev:r)'
+
+trigger:
+  branches:
+    include:
+      - main                              # <!-- CAMBIAR -->
+  paths:
+    include:
+      - src/**                             # <!-- CAMBIAR a la ruta de tu código fuente -->
+    exclude:
+      - '**/*.md'
+      - '**/.gitignore'
+
+pr: none
+
+# =============================================================================
+# STAGES
+# =============================================================================
+stages:
+  # ────────────────────────────────────────────────────────────────
+  # STAGE 1: CI — Build, Test, Scan, Publish
+  # Agente: Microsoft-hosted (ubuntu-latest para Node.js)
+  # ────────────────────────────────────────────────────────────────
+  - template: ../templates/stage-ci.yml
+    parameters:
+      technology: 'nodejs'
+      vmImage: 'ubuntu-latest'             # ubuntu es más rápido para Node.js
+      nodeVersion: '20.x'                  # <!-- CAMBIAR a tu versión de Node.js -->
+      packageManager: 'npm'                # <!-- CAMBIAR a 'yarn' si usas Yarn -->
+      buildScript: 'build'                 # <!-- CAMBIAR si tu script de build tiene otro nombre -->
+      testScript: 'test'                   # <!-- CAMBIAR -->
+      outputFolder: 'dist'                 # <!-- CAMBIAR a la carpeta de salida de tu build -->
+      artifactName: 'MiAppNode'            # <!-- CAMBIAR -->
+      # Nota: MSDO puede requerir windows-latest para algunas herramientas.
+      # Si el security scan falla en ubuntu, cambiar vmImage a 'windows-latest'.
+      enableSecurityScan: true
+
+  # ────────────────────────────────────────────────────────────────
+  # STAGE 2: CD — Deploy a Test
+  # ────────────────────────────────────────────────────────────────
+  - template: ../templates/stage-cd.yml
+    parameters:
+      environment: 'Test'
+      pool: 'Pool-Test'                    # <!-- CAMBIAR -->
+      variableGroup: 'vg-miapp-test'       # <!-- CAMBIAR -->
+      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
+      deployPath: 'C:\inetpub\wwwroot\MiAppNode'      # <!-- CAMBIAR -->
+      backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
+      healthCheckEndpoint: '/'             # <!-- CAMBIAR — '/' si no hay /health -->
+      dependsOn: 'CI'
+
+  # ────────────────────────────────────────────────────────────────
+  # STAGE 3: CD — Deploy a Producción
+  # ────────────────────────────────────────────────────────────────
+  - template: ../templates/stage-cd.yml
+    parameters:
+      environment: 'Prod'
+      pool: 'Pool-Prod'                    # <!-- CAMBIAR -->
+      variableGroup: 'vg-miapp-prod'       # <!-- CAMBIAR -->
+      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
+      deployPath: 'C:\inetpub\wwwroot\MiAppNode'      # <!-- CAMBIAR -->
+      backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
+      healthCheckEndpoint: '/'
+      dependsOn: 'CD_Test'
+      condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"

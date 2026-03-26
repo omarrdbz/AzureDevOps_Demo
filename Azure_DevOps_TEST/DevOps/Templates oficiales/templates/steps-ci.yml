@@ -1,0 +1,272 @@
+# =============================================================================
+# TEMPLATE: Steps de CI — Build, Test, Scan & Publish
+# =============================================================================
+# Capa:       Steps (la más baja — se invoca desde stage-ci.yml)
+# Propósito:  Compilar, ejecutar tests, escanear seguridad y publicar artefacto
+# Tecnologías soportadas: dotnet | nodejs | custom
+# Principio:  "Compila una vez, despliega múltiples veces" (artefacto inmutable)
+#
+# REQUISITOS:
+#   - Agente Microsoft-hosted con las herramientas de la tecnología elegida
+#   - Extensión "Microsoft Security DevOps" instalada en la organización
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=MicrosoftSecurityDevOps.microsoft-security-devops-azdevops)
+#
+# USO:
+#   - template: templates/steps-ci.yml
+#     parameters:
+#       technology: 'dotnet'          # o 'nodejs' o 'custom'
+#       projectPath: 'src/MiApp/MiApp.csproj'
+#       artifactName: 'MiApp'
+# =============================================================================
+
+parameters:
+  # ─────────────────────────────────────────────────────────────
+  # Parámetro principal: selecciona la tecnología de build
+  # Valores: 'dotnet' | 'nodejs' | 'custom'
+  # Con 'custom', solo se ejecutan scan + publish; los steps de
+  # build/test se deben agregar en el pipeline que consume este template.
+  # ─────────────────────────────────────────────────────────────
+  - name: technology
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - nodejs
+      - custom
+
+  # ─── Parámetros comunes ───────────────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  # ─── Parámetros .NET ──────────────────────────────────────────
+  - name: dotnetVersion
+    type: string
+    default: '8.x'
+
+  - name: projectPath
+    type: string
+    default: ''
+    # Ruta al .csproj o .sln — obligatorio para technology: dotnet
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testProjectPath
+    type: string
+    default: ''
+    # Si vacío y runTests=true, busca **/*Tests*.csproj
+
+  # ─── Parámetros Node.js ──────────────────────────────────────
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+
+  - name: packageManager
+    type: string
+    default: 'npm'
+    values:
+      - npm
+      - yarn
+
+  - name: buildScript
+    type: string
+    default: 'build'
+    # Nombre del script en package.json (npm run <buildScript>)
+
+  - name: testScript
+    type: string
+    default: 'test'
+
+  - name: outputFolder
+    type: string
+    default: 'dist'
+    # Carpeta de salida del build (se publica como artefacto)
+
+  # ─── Parámetros de seguridad ─────────────────────────────────
+  - name: enableSecurityScan
+    type: boolean
+    default: true
+    # SAST con Microsoft Security DevOps (MSDO)
+    # Migración futura: reemplazar por Snyk (ver sección SNYK más abajo)
+
+  - name: enableDependencyScan
+    type: boolean
+    default: true
+
+  # ─── Steps adicionales (inyección de steps custom antes del publish) ───
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+steps:
+  # ===========================================================================
+  # SECCIÓN 1: SETUP — Instalar herramientas según tecnología
+  # ===========================================================================
+
+  # ─── .NET: Instalar SDKs necesarios ─────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    # SDK 8.x siempre necesario para Microsoft Security DevOps (MSDO)
+    - task: UseDotNet@2
+      displayName: '🔧 Instalar .NET SDK 8.x (requerido por MSDO)'
+      inputs:
+        packageType: 'sdk'
+        version: '8.x'
+
+    # SDK de la versión del proyecto (si es diferente a 8.x)
+    - ${{ if ne(parameters.dotnetVersion, '8.x') }}:
+      - task: UseDotNet@2
+        displayName: '🔧 Instalar .NET SDK ${{ parameters.dotnetVersion }}'
+        inputs:
+          packageType: 'sdk'
+          version: '${{ parameters.dotnetVersion }}'
+
+  # ─── Node.js: Instalar runtime ──────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - task: NodeTool@0
+      displayName: '🔧 Instalar Node.js ${{ parameters.nodeVersion }}'
+      inputs:
+        versionSpec: '${{ parameters.nodeVersion }}'
+
+  # ===========================================================================
+  # SECCIÓN 2: BUILD — Compilar según tecnología
+  # ===========================================================================
+
+  # ─── .NET: Restore → Build ──────────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    - task: DotNetCoreCLI@2
+      displayName: '📦 Restore NuGet Packages'
+      inputs:
+        command: 'restore'
+        projects: '${{ parameters.projectPath }}'
+
+    - task: DotNetCoreCLI@2
+      displayName: '🔨 Build — ${{ parameters.buildConfiguration }}'
+      inputs:
+        command: 'build'
+        projects: '${{ parameters.projectPath }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --no-restore'
+
+  # ─── Node.js: Install → Build ──────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - ${{ if eq(parameters.packageManager, 'npm') }}:
+      - script: npm ci
+        displayName: '📦 npm ci (install dependencies)'
+
+    - ${{ if eq(parameters.packageManager, 'yarn') }}:
+      - script: yarn install --frozen-lockfile
+        displayName: '📦 yarn install (frozen lockfile)'
+
+    - script: ${{ parameters.packageManager }} run ${{ parameters.buildScript }}
+      displayName: '🔨 Build — ${{ parameters.packageManager }} run ${{ parameters.buildScript }}'
+
+  # ===========================================================================
+  # SECCIÓN 3: TEST — Ejecutar tests unitarios
+  # ===========================================================================
+
+  # ─── .NET: dotnet test ──────────────────────────────────────────────────
+  - ${{ if and(eq(parameters.technology, 'dotnet'), eq(parameters.runTests, true)) }}:
+    - task: DotNetCoreCLI@2
+      displayName: '🧪 Test'
+      inputs:
+        command: 'test'
+        projects: '${{ coalesce(parameters.testProjectPath, ''**/*Tests*.csproj'') }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --no-build'
+
+  # ─── Node.js: npm/yarn test ─────────────────────────────────────────────
+  - ${{ if and(eq(parameters.technology, 'nodejs'), eq(parameters.runTests, true)) }}:
+    - script: ${{ parameters.packageManager }} run ${{ parameters.testScript }}
+      displayName: '🧪 Test — ${{ parameters.packageManager }} run ${{ parameters.testScript }}'
+      continueOnError: true
+
+  # ===========================================================================
+  # SECCIÓN 4: SECURITY — Escaneo de seguridad
+  # ===========================================================================
+
+  # ─── SAST: Microsoft Security DevOps ────────────────────────────────────
+  # Herramienta actual. Para migrar a Snyk, reemplazar este bloque por:
+  #   - task: SnykSecurityScan@1
+  #     displayName: 'SAST — Snyk Code'
+  #     inputs:
+  #       serviceConnectionEndpoint: 'sc-snyk'
+  #       testType: 'code'
+  #       failOnIssues: false        # Cambiar a true cuando se estabilice
+  #     continueOnError: true
+  - ${{ if eq(parameters.enableSecurityScan, true) }}:
+    - task: MicrosoftSecurityDevOps@1
+      displayName: '🛡️ SAST — Microsoft Security DevOps'
+      inputs:
+        categories: 'code'
+      continueOnError: true
+
+  # ─── Dependency Scan: según tecnología ──────────────────────────────────
+  # Para migrar a Snyk, reemplazar este bloque por:
+  #   - task: SnykSecurityScan@1
+  #     displayName: 'Dependency Scan — Snyk Open Source'
+  #     inputs:
+  #       serviceConnectionEndpoint: 'sc-snyk'
+  #       testType: 'app'
+  #       failOnIssues: false
+  #     continueOnError: true
+  - ${{ if eq(parameters.enableDependencyScan, true) }}:
+    # .NET: auditoría de paquetes NuGet
+    - ${{ if eq(parameters.technology, 'dotnet') }}:
+      - task: DotNetCoreCLI@2
+        displayName: '🔍 Dependency Scan — NuGet Audit'
+        inputs:
+          command: 'custom'
+          custom: 'list'
+          arguments: 'package --vulnerable --include-transitive'
+          projects: '${{ parameters.projectPath }}'
+        continueOnError: true
+
+    # Node.js: npm audit
+    - ${{ if eq(parameters.technology, 'nodejs') }}:
+      - script: npm audit --audit-level=high || true
+        displayName: '🔍 Dependency Scan — npm audit'
+        continueOnError: true
+
+  # ===========================================================================
+  # SECCIÓN 5: STEPS ADICIONALES (pre-publish hook)
+  # ===========================================================================
+  # Permite inyectar steps personalizados antes de publicar el artefacto.
+  # Útil para: transformaciones de config, análisis adicionales, etc.
+  - ${{ each step in parameters.prePublishSteps }}:
+    - ${{ step }}
+
+  # ===========================================================================
+  # SECCIÓN 6: PUBLISH — Generar y publicar artefacto inmutable
+  # ===========================================================================
+
+  # ─── .NET: dotnet publish ───────────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    - task: DotNetCoreCLI@2
+      displayName: '📤 Publish App'
+      inputs:
+        command: 'publish'
+        projects: '${{ parameters.projectPath }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)'
+        publishWebProjects: false
+        zipAfterPublish: false
+        modifyOutputPath: false
+
+  # ─── Node.js: copiar carpeta de output ──────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - task: CopyFiles@2
+      displayName: '📤 Copiar build output a staging'
+      inputs:
+        SourceFolder: '${{ parameters.outputFolder }}'
+        Contents: '**'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  # ─── Publicar artefacto versionado (todas las tecnologías) ──────────────
+  # Nombre incluye BuildNumber y branch para trazabilidad completa.
+  # Este artefacto se descarga tal cual en cada environment de CD.
+  - publish: $(Build.ArtifactStagingDirectory)
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: '📦 Publicar Artefacto Versionado'

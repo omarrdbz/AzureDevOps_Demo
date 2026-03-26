@@ -1,0 +1,326 @@
+# =============================================================================
+# TEMPLATE: Steps de CD — Deploy a IIS con Web Deploy
+# =============================================================================
+# Capa:       Steps (la más baja — se invoca desde stage-cd.yml)
+# Propósito:  Backup, deploy via msdeploy.exe, health check, auto-rollback
+# Método:     Web Deploy (WMSVC) — sin privilegios de admin local
+# Principio:  Artefacto inmutable construido en CI se despliega sin recompilar
+#
+# REQUISITOS EN EL SERVIDOR:
+#   - Web Deploy 3.6+ instalado (msdeploy.exe)
+#   - Web Management Service (WMSVC) habilitado y corriendo (puerto 8172)
+#   - Delegación de Web Deploy configurada para la cuenta de servicio
+#   - Sitio IIS creado previamente (via script bootstrap)
+#   - Ver: DevOps/guia-web-deploy-iis.md
+#
+# VARIABLES REQUERIDAS EN VARIABLE GROUP:
+#   - WebsiteName          (nombre del sitio en IIS, ej: "MiApp-Test")
+#   - SiteUrl              (URL del sitio, ej: "https://miapp-test.empresa.local")
+#   - WebDeployUser        (cuenta de servicio para Web Deploy)
+#   - WebDeployPassword    🔒 (secreto)
+#   - (Opcionales) Variables de app: ConnectionStrings, API keys, etc.
+#
+# USO:
+#   - template: templates/steps-cd-iis.yml
+#     parameters:
+#       artifactName: 'MiApp'
+#       backupPath: 'C:\deploy-backups\MiApp'
+# =============================================================================
+
+parameters:
+  # ─── Identificación del artefacto ─────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  # ─── Rutas en el servidor ─────────────────────────────────────
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\WebApp'
+    # Ruta física del sitio IIS en el servidor destino
+
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\WebApp'
+    # Carpeta donde se guardan los backups rotativos
+
+  # ─── Web Deploy ───────────────────────────────────────────────
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  # ─── Health Check ─────────────────────────────────────────────
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+    # Endpoint que retorna HTTP 200 si la app está healthy.
+    # Para apps sin health check dedicado, usar '/' (homepage).
+
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  - name: healthCheckDelaySeconds
+    type: number
+    default: 10
+    # Segundos de espera entre reintentos de health check
+
+  # ─── Rollback y retención ─────────────────────────────────────
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+    # Si el health check falla, restaurar automáticamente el backup
+
+  - name: maxBackups
+    type: number
+    default: 5
+    # Cantidad máxima de backups a retener (los más antiguos se eliminan)
+
+  # ─── Información del entorno (se pasa desde stage-cd.yml) ────
+  - name: environment
+    type: string
+    default: ''
+
+steps:
+  # ===========================================================================
+  # PASO 1: Descargar artefacto inmutable construido en CI
+  # ===========================================================================
+  # El artefacto fue publicado en CI con nombre versionado.
+  # Se descarga exactamente el mismo binario sin recompilar.
+  - download: current
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: '📥 Descargar Artefacto'
+
+  # ===========================================================================
+  # PASO 2: Backup pre-deploy (OBLIGATORIO)
+  # ===========================================================================
+  # Crea una copia timestamped de la aplicación actual antes de sobrescribirla.
+  # Guarda la ruta del backup en la variable LastBackupPath para uso en rollback.
+  - powershell: |
+      $deployPath = "${{ parameters.deployPath }}"
+      $backupPath = "${{ parameters.backupPath }}"
+      $timestamp  = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupDir  = Join-Path $backupPath "backup-$timestamp"
+
+      # Verificar si hay algo que respaldar
+      if (Test-Path $deployPath) {
+          $itemCount = (Get-ChildItem $deployPath -Recurse -File -ErrorAction SilentlyContinue).Count
+          if ($itemCount -gt 0) {
+              New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+              Copy-Item -Path "$deployPath\*" -Destination $backupDir -Recurse -Force
+              Write-Host "✅ Backup creado: $backupDir ($itemCount archivos)"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]$backupDir"
+          } else {
+              Write-Host "⚠️ Carpeta de deploy vacía — omitiendo backup (primer deploy)"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+          }
+      } else {
+          Write-Host "⚠️ Carpeta de deploy no existe — primer deploy"
+          Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+      }
+    displayName: '💾 Backup Pre-Deploy'
+
+  # ===========================================================================
+  # PASO 3: Limpiar backups antiguos (retención rotativa)
+  # ===========================================================================
+  # Mantiene solo los últimos N backups (parámetro maxBackups).
+  # Los más antiguos se eliminan automáticamente.
+  - powershell: |
+      $backupPath = "${{ parameters.backupPath }}"
+      $maxBackups = ${{ parameters.maxBackups }}
+
+      if (Test-Path $backupPath) {
+          $backups  = Get-ChildItem $backupPath -Directory | Sort-Object CreationTime -Descending
+          $toDelete = $backups | Select-Object -Skip $maxBackups
+          if ($toDelete) {
+              $toDelete | ForEach-Object {
+                  Write-Host "  🗑️ Eliminando: $($_.Name)"
+                  Remove-Item $_.FullName -Recurse -Force
+              }
+              Write-Host "✅ Backups retenidos: $maxBackups"
+          } else {
+              Write-Host "✅ Dentro del límite de retención ($($backups.Count)/$maxBackups)"
+          }
+      } else {
+          New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+          Write-Host "📁 Directorio de backups creado: $backupPath"
+      }
+    displayName: '🧹 Limpiar Backups Antiguos'
+    continueOnError: true
+
+  # ===========================================================================
+  # PASO 4: Verificar que el sitio IIS existe
+  # ===========================================================================
+  # El sitio debe existir previamente (creado via script bootstrap).
+  # Si no existe, el pipeline falla con instrucciones claras de cómo resolverlo.
+  - powershell: |
+      $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
+      $site   = "$(WebsiteName)"
+
+      $exists = & $appcmd list site /name:"$site" 2>$null
+      if ($exists) {
+          Write-Host "✅ Sitio '$site' encontrado en IIS"
+      } else {
+          Write-Host "##vso[task.logissue type=error]Sitio '$site' no existe en IIS."
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  ACCIÓN REQUERIDA"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  Ejecutar el script bootstrap como Administrador en el servidor:"
+          Write-Host "    .\bootstrap\setup-iis-server.ps1 -ConfigFile .\server-config.json"
+          Write-Host ""
+          Write-Host "  Referencia: DevOps/guia-web-deploy-iis.md — Sección 8"
+          Write-Host "═══════════════════════════════════════════════"
+          exit 1
+      }
+    displayName: '🔍 Verificar Sitio IIS'
+
+  # ===========================================================================
+  # PASO 5: Deploy via Web Deploy (msdeploy.exe + WMSVC)
+  # ===========================================================================
+  # Usa Web Deploy para sincronizar el artefacto al sitio IIS.
+  # - Sync diferencial: solo transfiere archivos que cambiaron
+  # - App Offline automático: detiene peticiones durante el deploy
+  # - Sin admin local: opera vía delegación WMSVC
+  # - Credenciales: se inyectan via env vars desde el Variable Group
+  - powershell: |
+      $msdeployExe  = "${{ parameters.msdeployPath }}"
+      $site         = "$(WebsiteName)"
+      $artifactPath = "$(Pipeline.Workspace)/${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)"
+
+      # Verificar que msdeploy.exe existe en el servidor
+      if (-not (Test-Path $msdeployExe)) {
+          throw "msdeploy.exe no encontrado en: $msdeployExe. Instalar Web Deploy 3.6+ (ver guia-web-deploy-iis.md Sección 2)"
+      }
+
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  DEPLOY CON WEB DEPLOY (MSDeploy)"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Sitio:       $site"
+      Write-Host "  Artefacto:   $artifactPath"
+      Write-Host "  Modo:        WMSVC (sin admin local)"
+      Write-Host "  Entorno:     ${{ parameters.environment }}"
+      Write-Host "═══════════════════════════════════════════════"
+
+      # Construir argumentos de msdeploy de forma segura
+      $msdeployArgs = @(
+          "-verb:sync",
+          "-source:contentPath=`"$artifactPath`"",
+          "-dest:contentPath=`"$site`",computerName=`"https://localhost:8172/msdeploy.axd?site=$site`",userName=`"$env:WEBDEPLOY_USER`",password=`"$env:WEBDEPLOY_PASSWORD`",authType=`"Basic`"",
+          "-enableRule:AppOffline",
+          "-allowUntrusted",
+          "-retryAttempts:2",
+          "-retryInterval:3000"
+      )
+
+      & $msdeployExe $msdeployArgs
+
+      if ($LASTEXITCODE -ne 0) {
+          throw "Web Deploy falló con código de salida: $LASTEXITCODE"
+      }
+
+      Write-Host ""
+      Write-Host "✅ Deploy completado exitosamente via Web Deploy"
+    displayName: '🚀 Deploy — Web Deploy (msdeploy.exe)'
+    env:
+      # Los secretos se pasan como env vars para evitar exposición en logs.
+      # Estas variables deben estar definidas en el Variable Group del entorno.
+      WEBDEPLOY_USER: $(WebDeployUser)
+      WEBDEPLOY_PASSWORD: $(WebDeployPassword)
+
+  # ===========================================================================
+  # PASO 6: Health Check + Auto-Rollback
+  # ===========================================================================
+  # Verifica que la aplicación responda correctamente después del deploy.
+  # Si falla después de N reintentos y hay un backup disponible,
+  # ejecuta rollback automático restaurando el backup más reciente.
+  - powershell: |
+      $siteUrl        = "$(SiteUrl)"
+      $endpoint       = "${{ parameters.healthCheckEndpoint }}"
+      $fullUrl        = "${siteUrl}${endpoint}"
+      $maxRetries     = ${{ parameters.healthCheckRetries }}
+      $retryDelay     = ${{ parameters.healthCheckDelaySeconds }}
+      $enableRollback = [System.Convert]::ToBoolean("${{ parameters.enableAutoRollback }}")
+      $lastBackup     = "$(LastBackupPath)"
+      $deployPath     = "${{ parameters.deployPath }}"
+      $websiteName    = "$(WebsiteName)"
+
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  HEALTH CHECK"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  URL:      $fullUrl"
+      Write-Host "  Intentos: $maxRetries"
+      Write-Host "  Rollback: $(if ($enableRollback) { 'Habilitado' } else { 'Deshabilitado' })"
+      Write-Host "═══════════════════════════════════════════════"
+
+      # Esperar que la aplicación inicie
+      Start-Sleep -Seconds 5
+
+      $success = $false
+      for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+              Write-Host "`nIntento $i de $maxRetries..."
+              $response = Invoke-WebRequest -Uri $fullUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Health check exitoso (HTTP $($response.StatusCode))"
+                  $success = $true
+                  break
+              } else {
+                  Write-Host "⚠️ Respuesta inesperada: HTTP $($response.StatusCode)"
+              }
+          } catch {
+              Write-Host "❌ Intento $i falló: $($_.Exception.Message)"
+              if ($i -lt $maxRetries) {
+                  Write-Host "   Esperando $retryDelay segundos..."
+                  Start-Sleep -Seconds $retryDelay
+              }
+          }
+      }
+
+      # Si el health check falló, intentar rollback automático
+      if (-not $success) {
+          if ($enableRollback -and $lastBackup -and (Test-Path $lastBackup)) {
+              Write-Host ""
+              Write-Host "═══════════════════════════════════════════════"
+              Write-Host "  🔄 ROLLBACK AUTOMÁTICO"
+              Write-Host "═══════════════════════════════════════════════"
+              Write-Host "  Restaurando desde: $lastBackup"
+
+              $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
+              & $appcmd stop site /site.name:"$websiteName" 2>$null
+              Start-Sleep -Seconds 3
+
+              Remove-Item "$deployPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+              Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
+
+              & $appcmd start site /site.name:"$websiteName" 2>$null
+              Start-Sleep -Seconds 5
+
+              throw "❌ Deploy falló — rollback ejecutado desde: $lastBackup"
+          } else {
+              throw "❌ Deploy falló — health check no pasó después de $maxRetries intentos (sin backup para rollback)"
+          }
+      }
+    displayName: '🏥 Health Check + Auto-Rollback'
+
+  # ===========================================================================
+  # PASO 7: Resumen del Deploy
+  # ===========================================================================
+  # Se ejecuta siempre (exitoso o fallido) para tener trazabilidad completa.
+  - powershell: |
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  DEPLOY SUMMARY"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Environment:   ${{ parameters.environment }}"
+      Write-Host "  Website:       $(WebsiteName)"
+      Write-Host "  Deploy Path:   ${{ parameters.deployPath }}"
+      Write-Host "  Site URL:      $(SiteUrl)"
+      Write-Host "  Artifact:      ${{ parameters.artifactName }}"
+      Write-Host "  Build Number:  $(Build.BuildNumber)"
+      Write-Host "  Branch:        $(Build.SourceBranchName)"
+      Write-Host "  Deployed By:   $(Build.RequestedFor)"
+      Write-Host "  Timestamp:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+      Write-Host "═══════════════════════════════════════════════"
+    displayName: '📋 Deploy Summary'
+    condition: succeededOrFailed()

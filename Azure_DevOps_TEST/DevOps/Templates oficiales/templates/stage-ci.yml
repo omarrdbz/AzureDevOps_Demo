@@ -1,0 +1,130 @@
+# =============================================================================
+# TEMPLATE: Stage CI — Wrapper para Build, Test, Scan & Publish
+# =============================================================================
+# Capa:       Stage (intermedia — se invoca desde el pipeline principal)
+# Propósito:  Encapsular el template de steps CI con pool y configuración
+# Agente:     Microsoft-hosted (efímero, no tiene acceso a servidores internos)
+#
+# Este stage:
+#   1. Ejecuta en un agente limpio de Microsoft (sin estado previo)
+#   2. Compila, prueba, escanea y publica un artefacto inmutable
+#   3. El artefacto se consume en los stages de CD posteriores
+#
+# USO:
+#   stages:
+#     - template: templates/stage-ci.yml
+#       parameters:
+#         technology: 'dotnet'
+#         projectPath: 'src/MiApp/MiApp.csproj'
+#         artifactName: 'MiApp'
+# =============================================================================
+
+parameters:
+  # ─── Tecnología ───────────────────────────────────────────────
+  - name: technology
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - nodejs
+      - custom
+
+  # ─── Pool del agente CI ───────────────────────────────────────
+  # Microsoft-hosted. Cambiar vmImage según necesidad:
+  #   - 'windows-latest' para .NET Framework o builds Windows-only
+  #   - 'ubuntu-latest' para Node.js, .NET Core multiplataforma
+  - name: vmImage
+    type: string
+    default: 'windows-latest'
+
+  # ─── Parámetros comunes ───────────────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  # ─── Parámetros .NET ──────────────────────────────────────────
+  - name: dotnetVersion
+    type: string
+    default: '8.x'
+
+  - name: projectPath
+    type: string
+    default: ''
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testProjectPath
+    type: string
+    default: ''
+
+  # ─── Parámetros Node.js ──────────────────────────────────────
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+
+  - name: packageManager
+    type: string
+    default: 'npm'
+
+  - name: buildScript
+    type: string
+    default: 'build'
+
+  - name: testScript
+    type: string
+    default: 'test'
+
+  - name: outputFolder
+    type: string
+    default: 'dist'
+
+  # ─── Seguridad ────────────────────────────────────────────────
+  - name: enableSecurityScan
+    type: boolean
+    default: true
+
+  - name: enableDependencyScan
+    type: boolean
+    default: true
+
+  # ─── Steps adicionales ────────────────────────────────────────
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+stages:
+  - stage: CI
+    displayName: 'CI — Build, Test & Scan'
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    jobs:
+      - job: Build
+        displayName: 'Build & Publish Artifact'
+        steps:
+          - template: steps-ci.yml
+            parameters:
+              technology: ${{ parameters.technology }}
+              artifactName: ${{ parameters.artifactName }}
+              buildConfiguration: ${{ parameters.buildConfiguration }}
+              # .NET
+              dotnetVersion: ${{ parameters.dotnetVersion }}
+              projectPath: ${{ parameters.projectPath }}
+              runTests: ${{ parameters.runTests }}
+              testProjectPath: ${{ parameters.testProjectPath }}
+              # Node.js
+              nodeVersion: ${{ parameters.nodeVersion }}
+              packageManager: ${{ parameters.packageManager }}
+              buildScript: ${{ parameters.buildScript }}
+              testScript: ${{ parameters.testScript }}
+              outputFolder: ${{ parameters.outputFolder }}
+              # Seguridad
+              enableSecurityScan: ${{ parameters.enableSecurityScan }}
+              enableDependencyScan: ${{ parameters.enableDependencyScan }}
+              # Custom
+              prePublishSteps: ${{ parameters.prePublishSteps }}
