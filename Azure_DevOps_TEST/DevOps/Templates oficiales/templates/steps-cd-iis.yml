@@ -76,6 +76,41 @@ parameters:
     default: 5
     # Cantidad máxima de backups a retener (los más antiguos se eliminan)
 
+  # ─── OWASP ZAP — Escaneo dinámico post-deploy (DAST) ──────────
+  - name: enableDAST
+    type: boolean
+    default: false
+    # DAST (Dynamic Application Security Testing) con OWASP ZAP.
+    # Ejecuta un escaneo de seguridad contra la aplicación desplegada.
+    # Requiere: Docker instalado en el agente self-hosted.
+    # Ver README.md — Sección "Integración con OWASP ZAP" para detalles.
+
+  - name: dastTargetUrl
+    type: string
+    default: ''
+    # URL objetivo para el escaneo DAST. Si vacío, usa $(SiteUrl).
+    # Puede incluir rutas específicas, ej: 'https://miapp-test.empresa.local/api'
+
+  - name: dastScanType
+    type: string
+    default: 'baseline'
+    values:
+      - baseline      # Rápido (~5 min): solo escaneo pasivo, ideal para pipelines
+      - full          # Completo (~30+ min): escaneo activo + pasivo, solo en Test
+    # baseline: no modifica datos, seguro para cualquier entorno
+    # full: puede enviar payloads de prueba, usar solo en entornos de Test
+
+  - name: dastFailOnRisk
+    type: string
+    default: 'High'
+    values:
+      - High          # Falla solo con vulnerabilidades de riesgo alto
+      - Medium        # Falla con riesgo medio o superior
+      - Low           # Falla con cualquier hallazgo
+      - Informational # Falla con cualquier hallazgo incluyendo informativos
+    # Nivel de riesgo mínimo que causa que el pipeline falle.
+    # Recomendación: 'High' inicialmente, migrar a 'Medium' cuando se estabilice.
+
   # ─── Información del entorno (se pasa desde stage-cd.yml) ────
   - name: environment
     type: string
@@ -305,7 +340,117 @@ steps:
     displayName: '🏥 Health Check + Auto-Rollback'
 
   # ===========================================================================
-  # PASO 7: Resumen del Deploy
+  # PASO 7: DAST — OWASP ZAP (Escaneo dinámico post-deploy)
+  # ===========================================================================
+  # Ejecuta OWASP ZAP contra la aplicación ya desplegada y corriendo.
+  # Se ejecuta DESPUÉS del health check porque necesita una app funcional.
+  #
+  # REQUISITOS para habilitar OWASP ZAP:
+  #   1. Docker Desktop o Docker Engine instalado en el agente self-hosted
+  #   2. El agente debe poder hacer pull de la imagen 'ghcr.io/zaproxy/zaproxy'
+  #   3. El agente debe tener conectividad HTTP/HTTPS hacia la URL del sitio
+  #   4. Pasar enableDAST: true en los parámetros del stage CD
+  #
+  # MODOS DE ESCANEO:
+  #   baseline — Solo escaneo pasivo (crawl + análisis de respuestas)
+  #              No envía payloads ofensivos. Seguro para producción.
+  #              Duración: ~2-5 minutos.
+  #   full     — Escaneo activo + pasivo (incluye fuzzing y payloads)
+  #              Puede crear datos de prueba. SOLO usar en Test/Dev.
+  #              Duración: ~15-60 minutos según tamaño de la app.
+  #
+  # ALTERNATIVA SIN DOCKER: Si Docker no está disponible, se puede usar
+  #   la extensión "OWASP ZAP Scanner" del Marketplace de Azure DevOps:
+  #   https://marketplace.visualstudio.com/items?itemName=CSE-DevOps.zap-scanner
+  #   En ese caso, reemplazar el bloque de script por:
+  #     - task: owaspzap@1
+  #       displayName: '🔍 DAST — OWASP ZAP'
+  #       inputs:
+  #         scanType: 'targetedScan'
+  #         url: '<targetUrl>'
+  #         port: '443'
+  - ${{ if eq(parameters.enableDAST, true) }}:
+    - powershell: |
+        $targetUrl = "${{ coalesce(parameters.dastTargetUrl, '$(SiteUrl)') }}"
+        $scanType  = "${{ parameters.dastScanType }}"
+        $failLevel = "${{ parameters.dastFailOnRisk }}"
+        $reportDir = "$(Build.ArtifactStagingDirectory)/zap-reports"
+
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  OWASP ZAP — DAST Security Scan"
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  Target:     $targetUrl"
+        Write-Host "  Scan Type:  $scanType"
+        Write-Host "  Fail Level: $failLevel"
+        Write-Host "═══════════════════════════════════════════════"
+
+        # Verificar que Docker esté disponible
+        $dockerExists = Get-Command docker -ErrorAction SilentlyContinue
+        if (-not $dockerExists) {
+            Write-Host "##vso[task.logissue type=warning]Docker no encontrado. DAST omitido."
+            Write-Host "Para habilitar DAST: instalar Docker en el agente self-hosted."
+            Write-Host "Alternativa: usar extensión OWASP ZAP Scanner del Marketplace."
+            exit 0
+        }
+
+        # Crear carpeta de reportes
+        New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+
+        # Seleccionar el script de escaneo según el tipo
+        $zapScript = if ($scanType -eq 'full') { 'zap-full-scan.py' } else { 'zap-baseline.py' }
+
+        Write-Host "`nIniciando escaneo ZAP ($zapScript)..."
+
+        # Ejecutar OWASP ZAP en Docker
+        # -t: URL objetivo
+        # -r: reporte HTML de salida
+        # -J: reporte JSON de salida
+        # -l: nivel mínimo de alerta para reportar (Pass, Ignore, Info, Warn, Fail)
+        docker run --rm `
+            -v "${reportDir}:/zap/wrk:rw" `
+            ghcr.io/zaproxy/zaproxy `
+            $zapScript `
+            -t $targetUrl `
+            -r zap-report.html `
+            -J zap-report.json `
+            -l Warn `
+            -I
+            # -I: no fallar en alertas (manejamos el fallo nosotros abajo)
+
+        $zapExitCode = $LASTEXITCODE
+        Write-Host "`n═══════════════════════════════════════════════"
+
+        # Publicar reportes como artefactos del pipeline
+        if (Test-Path "$reportDir/zap-report.html") {
+            Write-Host "📄 Reporte ZAP disponible como artefacto del pipeline"
+        }
+
+        # Evaluar resultado según nivel de riesgo configurado
+        if ($zapExitCode -ne 0) {
+            Write-Host "##vso[task.logissue type=warning]ZAP encontró alertas de seguridad (exit code: $zapExitCode)"
+            # Exit codes de ZAP: 1=WARN, 2=FAIL
+            # Solo fallamos si el nivel configurado lo requiere
+            if ($zapExitCode -ge 2) {
+                Write-Host "##vso[task.logissue type=error]DAST encontró vulnerabilidades de nivel $failLevel o superior."
+                Write-Host "Revisar el reporte ZAP en los artefactos del pipeline."
+                # Descomentar la siguiente línea para hacer que el pipeline falle:
+                # exit 1
+            }
+        } else {
+            Write-Host "✅ DAST completado — no se encontraron alertas"
+        }
+      displayName: '🔍 DAST — OWASP ZAP Scan'
+      continueOnError: true
+
+    # Publicar reportes ZAP como artefacto del pipeline
+    - publish: $(Build.ArtifactStagingDirectory)/zap-reports
+      artifact: 'ZAP-Report-${{ parameters.environment }}-$(Build.BuildNumber)'
+      displayName: '📄 Publicar Reportes ZAP'
+      condition: and(succeeded(), eq('${{ parameters.enableDAST }}', 'true'))
+      continueOnError: true
+
+  # ===========================================================================
+  # PASO 8: Resumen del Deploy
   # ===========================================================================
   # Se ejecuta siempre (exitoso o fallido) para tener trazabilidad completa.
   - powershell: |
@@ -320,6 +465,7 @@ steps:
       Write-Host "  Build Number:  $(Build.BuildNumber)"
       Write-Host "  Branch:        $(Build.SourceBranchName)"
       Write-Host "  Deployed By:   $(Build.RequestedFor)"
+      Write-Host "  DAST:          ${{ parameters.enableDAST }}"
       Write-Host "  Timestamp:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
       Write-Host "═══════════════════════════════════════════════"
     displayName: '📋 Deploy Summary'

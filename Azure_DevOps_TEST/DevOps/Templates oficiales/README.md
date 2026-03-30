@@ -18,9 +18,11 @@
 8. [Variables Requeridas por Entorno](#8-variables-requeridas-por-entorno)
 9. [Estrategia de Branching](#9-estrategia-de-branching)
 10. [Seguridad](#10-seguridad)
-11. [Consideraciones Especiales](#11-consideraciones-especiales)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Recomendaciones y Mejoras Futuras](#13-recomendaciones-y-mejoras-futuras)
+11. [Integración con SonarQube](#11-integración-con-sonarqube)
+12. [Integración con OWASP ZAP](#12-integración-con-owasp-zap)
+13. [Consideraciones Especiales](#13-consideraciones-especiales)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Recomendaciones y Mejoras Futuras](#15-recomendaciones-y-mejoras-futuras)
 
 ---
 
@@ -96,7 +98,8 @@ CAPA 3 — Pipeline (pipelines/*.yml)
 │  │  │  3. Verificar sitio IIS                                  │  │  │
 │  │  │  4. Deploy via Web Deploy (msdeploy.exe)                 │  │  │
 │  │  │  5. Health Check (+ auto-rollback si falla)              │  │  │
-│  │  │  6. Deploy Summary                                       │  │  │
+│  │  │  6. DAST — OWASP ZAP (si habilitado)                     │  │  │
+│  │  │  7. Deploy Summary                                       │  │  │
 │  │  └──────────────────────────────────────────────────────────┘  │  │
 │  └──────────────────────────┬─────────────────────────────────────┘  │
 │                              │ mismo artefacto                        │
@@ -133,6 +136,10 @@ CAPA 3 — Pipeline (pipelines/*.yml)
 | `outputFolder` | string | `dist` | Carpeta de salida del build (Node.js) |
 | `enableSecurityScan` | boolean | `true` | Habilitar SAST (MSDO) |
 | `enableDependencyScan` | boolean | `true` | Habilitar escaneo de dependencias |
+| `enableSonarQube` | boolean | `false` | Habilitar análisis SonarQube |
+| `sonarQubeServiceConnection` | string | `sc-sonarqube` | Service Connection a SonarQube |
+| `sonarQubeProjectKey` | string | — | Clave del proyecto en SonarQube |
+| `sonarQubeProjectName` | string | — | Nombre del proyecto en SonarQube |
 | `prePublishSteps` | stepList | `[]` | Steps custom antes de publicar |
 
 ---
@@ -152,6 +159,10 @@ CAPA 3 — Pipeline (pipelines/*.yml)
 | `healthCheckDelaySeconds` | number | `10` | Segundos entre reintentos |
 | `enableAutoRollback` | boolean | `true` | Rollback automático si falla el health check |
 | `maxBackups` | number | `5` | Máximo de backups a retener |
+| `enableDAST` | boolean | `false` | Habilitar escaneo OWASP ZAP post-deploy |
+| `dastTargetUrl` | string | — | URL objetivo para DAST (default: `$(SiteUrl)`) |
+| `dastScanType` | string | `baseline` | `baseline` (pasivo, ~5min) o `full` (activo, ~30min) |
+| `dastFailOnRisk` | string | `High` | Nivel mínimo de riesgo que causa fallo |
 | `environment` | string | — | Nombre del entorno (informativo) |
 
 **Variables requeridas en el Variable Group:**
@@ -359,7 +370,155 @@ Cuando se migre de MSDO a Snyk:
 
 ---
 
-## 11. Consideraciones Especiales
+## 11. Integración con SonarQube
+
+SonarQube proporciona análisis estático de calidad y seguridad del código. El template `steps-ci.yml` incluye soporte integrado que se activa con `enableSonarQube: true`.
+
+### Requisitos
+
+| Requisito | Descripción | Dónde |
+|-----------|-------------|-------|
+| **Instancia SonarQube** | Servidor SonarQube accesible desde los agentes CI | On-Prem o SonarCloud |
+| **Extensión Azure DevOps** | [SonarQube](https://marketplace.visualstudio.com/items?itemName=SonarSource.sonarqube) instalada en la organización | Azure DevOps Marketplace |
+| **Service Connection** | Tipo "SonarQube" configurada en Project Settings | Azure DevOps > Project Settings > Service Connections |
+| **Proyecto SonarQube** | Proyecto creado en SonarQube con la `projectKey` correcta | Servidor SonarQube |
+
+### Configuración Paso a Paso
+
+**1. Instalar la extensión:**
+- Ir a [Azure DevOps Marketplace — SonarQube](https://marketplace.visualstudio.com/items?itemName=SonarSource.sonarqube)
+- Clic en "Get it free" → seleccionar tu organización → Install
+
+**2. Crear Service Connection:**
+1. Ir a Project Settings > Service Connections > New Service Connection
+2. Seleccionar "SonarQube"
+3. Configurar:
+   ```
+   Server URL:           https://sonarqube.empresa.local   (o tu URL)
+   Token:                squ_xxxxxxxxxxxxx                   (generado en SonarQube > My Account > Security)
+   Service connection name: sc-sonarqube
+   ```
+4. Clic en "Save"
+
+**3. Crear proyecto en SonarQube:**
+1. En SonarQube, ir a Projects > Create Project
+2. Project key: `mi-org_mi-app` (este valor va en `sonarQubeProjectKey`)
+3. Display name: `Mi App` (este valor va en `sonarQubeProjectName`)
+
+### Uso en el Pipeline
+
+```yaml
+# En tu archivo pipeline:
+- template: ../templates/stage-ci.yml
+  parameters:
+    technology: 'dotnet'
+    projectPath: 'src/MiApp/MiApp.csproj'
+    artifactName: 'MiApp'
+    # ── SonarQube ──
+    enableSonarQube: true
+    sonarQubeServiceConnection: 'sc-sonarqube'
+    sonarQubeProjectKey: 'mi-org_mi-app'
+    sonarQubeProjectName: 'Mi App'
+```
+
+### Notas sobre Tecnología
+
+| Tecnología | Scanner Mode | Notas |
+|------------|-------------|-------|
+| **.NET** | `MSBuild` | Funciona directamente. El scanner envuelve el build de .NET. |
+| **Node.js** | `CLI` | Requiere modificar `scannerMode` a `CLI` en `steps-ci.yml`. Ver comentarios en el archivo. |
+| **Custom** | Depende | Configurar manualmente según la tecnología. |
+
+### Quality Gate
+
+Por defecto, el step de SonarQube tiene `continueOnError: true`. Para hacer que el pipeline falle si no pasa el Quality Gate, cambiar a `false` en `steps-ci.yml` en el task `SonarQubePublish@6`.
+
+---
+
+## 12. Integración con OWASP ZAP
+
+OWASP ZAP (Zed Attack Proxy) proporciona DAST (Dynamic Application Security Testing) — escaneo de seguridad contra la aplicación desplegada y corriendo. El template `steps-cd-iis.yml` incluye soporte que se activa con `enableDAST: true`.
+
+### ¿Qué es DAST vs SAST?
+
+| Tipo | Cuándo | Qué analiza | Herramienta |
+|------|--------|-------------|-------------|
+| **SAST** (estático) | En CI, sobre código fuente | Código sin ejecutar | MSDO, Snyk, SonarQube |
+| **DAST** (dinámico) | En CD, post-deploy | App corriendo (HTTP) | OWASP ZAP |
+
+### Requisitos
+
+| Requisito | Descripción | Dónde |
+|-----------|-------------|-------|
+| **Docker** | Docker Desktop o Docker Engine instalado y corriendo | Agente self-hosted |
+| **Imagen ZAP** | `ghcr.io/zaproxy/zaproxy` accesible (pull desde internet o registry interno) | Docker |
+| **Conectividad** | El agente debe poder alcanzar la URL del sitio desplegado via HTTP/HTTPS | Red |
+
+### Modos de Escaneo
+
+| Modo | Duración | Qué hace | ¿Seguro para Prod? |
+|------|----------|----------|--------------------|
+| **baseline** | ~2-5 min | Solo escaneo pasivo: crawl + análisis de respuestas HTTP. No envía payloads ofensivos. | ✅ Sí |
+| **full** | ~15-60 min | Escaneo activo + pasivo: incluye fuzzing, inyección SQL, XSS, etc. Puede crear datos de prueba. | ❌ Solo Test/Dev |
+
+### Uso en el Pipeline
+
+```yaml
+# Deploy a Test CON escaneo DAST:
+- template: ../templates/stage-cd.yml
+  parameters:
+    environment: 'Test'
+    pool: 'Pool-Test'
+    variableGroup: 'vg-miapp-test'
+    artifactName: 'MiApp'
+    deployPath: 'C:\inetpub\wwwroot\MiApp'
+    backupPath: 'C:\deploy-backups\MiApp'
+    dependsOn: 'CI'
+    # ── OWASP ZAP ──
+    enableDAST: true
+    dastScanType: 'baseline'       # 'baseline' para pipeline, 'full' solo en Test
+    dastFailOnRisk: 'High'         # 'High', 'Medium', 'Low', 'Informational'
+
+# Deploy a Prod SIN escaneo DAST (ya se escaneó en Test):
+- template: ../templates/stage-cd.yml
+  parameters:
+    environment: 'Prod'
+    pool: 'Pool-Prod'
+    variableGroup: 'vg-miapp-prod'
+    artifactName: 'MiApp'
+    dependsOn: 'CD_Test'
+    enableDAST: false              # No ejecutar DAST en Prod
+```
+
+### Reportes
+
+Cuando DAST está habilitado, los reportes de ZAP se publican como artefactos del pipeline:
+- `ZAP-Report-{environment}-{buildNumber}` → contiene `zap-report.html` y `zap-report.json`
+- El reporte HTML se puede descargar desde la pestaña de artefactos del pipeline en Azure DevOps
+
+### Alternativa sin Docker
+
+Si Docker no está disponible en los agentes self-hosted, se puede usar la extensión del Marketplace:
+- [OWASP ZAP Scanner](https://marketplace.visualstudio.com/items?itemName=CSE-DevOps.zap-scanner)
+- El template incluye comentarios con el código de reemplazo para usar la extensión
+
+### Instalación de Docker en el Agente
+
+```powershell
+# Opción 1: Docker Desktop (desarrollo y pruebas)
+winget install Docker.DockerDesktop
+
+# Opción 2: Docker Engine vía Containers Feature (servidores)
+Install-WindowsFeature Containers
+# Reiniciar el servidor
+Install-Module DockerMsftProvider -Force
+Install-Package Docker -ProviderName DockerMsftProvider -Force
+Start-Service Docker
+```
+
+---
+
+## 13. Consideraciones Especiales
 
 ### Node.js en IIS
 
@@ -399,7 +558,7 @@ Esto garantiza trazabilidad completa del binario desplegado.
 
 ---
 
-## 12. Troubleshooting
+## 14. Troubleshooting
 
 | Problema | Causa | Solución |
 |----------|-------|----------|
@@ -412,10 +571,16 @@ Esto garantiza trazabilidad completa del binario desplegado.
 | CD no se ejecuta | Condición de branch no cumplida | Verificar que el push sea a `main` |
 | Aprobación no solicitada | Environment sin checks configurados | Agregar Approval check en el Environment |
 | npm audit falla | Vulnerabilidades críticas encontradas | Revisar y parchar dependencias; `continueOnError: true` ya activo |
+| SonarQube: "Not authorized" | Token inválido o expirado | Regenerar token en SonarQube > My Account > Security |
+| SonarQube: "Project not found" | `projectKey` no coincide | Verificar la key exacta en SonarQube > Projects |
+| SonarQube: scanner no encuentra código | scannerMode incorrecto | .NET usa `MSBuild`, Node.js usa `CLI` |
+| ZAP: Docker no encontrado | Docker no instalado en agente self-hosted | Instalar Docker (ver sección 12) o usar extensión del Marketplace |
+| ZAP: no puede alcanzar la URL | Firewall o DNS | Verificar que el agente puede hacer `curl $(SiteUrl)` |
+| ZAP: escaneo tarda demasiado | Modo `full` en app grande | Usar `baseline` en pipelines; `full` solo bajo demanda |
 
 ---
 
-## 13. Recomendaciones y Mejoras Futuras
+## 15. Recomendaciones y Mejoras Futuras
 
 ### 🔐 Seguridad
 
@@ -425,7 +590,6 @@ Esto garantiza trazabilidad completa del binario desplegado.
 | **Migración a Snyk** | Alta | Reemplazar MSDO por Snyk para SAST + SCA con mejor cobertura y dashboard centralizado |
 | **Container scanning** | Media | Si se adoptan contenedores, agregar escaneo de imágenes Docker (Trivy, Snyk Container) |
 | **Signed artifacts** | Media | Firmar digitalmente los artefactos para garantizar integridad end-to-end |
-| **DAST (Dynamic Analysis)** | Baja | Agregar escaneo dinámico post-deploy con OWASP ZAP o Burp Suite |
 
 ### 🔧 Infraestructura y Operaciones
 

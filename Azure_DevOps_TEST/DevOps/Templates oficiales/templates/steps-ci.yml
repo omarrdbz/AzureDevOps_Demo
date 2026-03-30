@@ -99,6 +99,30 @@ parameters:
     type: boolean
     default: true
 
+  # ─── SonarQube (análisis estático de calidad y seguridad) ────
+  - name: enableSonarQube
+    type: boolean
+    default: false
+    # Requiere: extensión SonarQube instalada en Azure DevOps
+    # Requiere: Service Connection tipo SonarQube ('sc-sonarqube')
+    # Requiere: proyecto creado en SonarQube con la projectKey adecuada
+    # Ver README.md — Sección "Integración con SonarQube" para detalles
+
+  - name: sonarQubeServiceConnection
+    type: string
+    default: 'sc-sonarqube'
+    # Nombre de la Service Connection de tipo SonarQube
+
+  - name: sonarQubeProjectKey
+    type: string
+    default: ''
+    # Clave del proyecto en SonarQube (ej: 'mi-org_mi-app')
+
+  - name: sonarQubeProjectName
+    type: string
+    default: ''
+    # Nombre legible del proyecto en SonarQube
+
   # ─── Steps adicionales (inyección de steps custom antes del publish) ───
   - name: prePublishSteps
     type: stepList
@@ -132,6 +156,33 @@ steps:
       displayName: '🔧 Instalar Node.js ${{ parameters.nodeVersion }}'
       inputs:
         versionSpec: '${{ parameters.nodeVersion }}'
+
+  # ===========================================================================
+  # SECCIÓN 1.5: SONARQUBE PREPARE (debe ejecutarse ANTES del build)
+  # ===========================================================================
+  # SonarQube necesita "envolver" el build: Prepare → Build → Analyze.
+  # Por eso Prepare se ejecuta aquí, antes de la sección de Build.
+  #
+  # REQUISITOS para habilitar SonarQube:
+  #   1. Instalar extensión "SonarQube" desde Azure DevOps Marketplace
+  #      https://marketplace.visualstudio.com/items?itemName=SonarSource.sonarqube
+  #   2. Crear Service Connection tipo "SonarQube" en Project Settings
+  #   3. Crear el proyecto en tu instancia de SonarQube
+  #   4. Pasar enableSonarQube: true y los parámetros sonarQube*
+  - ${{ if eq(parameters.enableSonarQube, true) }}:
+    - task: SonarQubePrepare@6
+      displayName: '📊 SonarQube — Prepare Analysis'
+      inputs:
+        SonarQube: '${{ parameters.sonarQubeServiceConnection }}'
+        scannerMode: 'MSBuild'           # Para .NET. Ver nota abajo para Node.js.
+        projectKey: '${{ parameters.sonarQubeProjectKey }}'
+        projectName: '${{ parameters.sonarQubeProjectName }}'
+        # ── Para Node.js, cambiar scannerMode a 'CLI' y agregar:
+        #    scannerMode: 'CLI'
+        #    configMode: 'manual'
+        #    cliProjectKey: '${{ parameters.sonarQubeProjectKey }}'
+        #    cliProjectName: '${{ parameters.sonarQubeProjectName }}'
+        #    cliSources: '.'
 
   # ===========================================================================
   # SECCIÓN 2: BUILD — Compilar según tecnología
@@ -183,6 +234,23 @@ steps:
     - script: ${{ parameters.packageManager }} run ${{ parameters.testScript }}
       displayName: '🧪 Test — ${{ parameters.packageManager }} run ${{ parameters.testScript }}'
       continueOnError: true
+
+  # ===========================================================================
+  # SECCIÓN 3.5: SONARQUBE ANALYZE (debe ejecutarse DESPUÉS del build y tests)
+  # ===========================================================================
+  # Ejecuta el análisis y publica resultados al servidor SonarQube.
+  - ${{ if eq(parameters.enableSonarQube, true) }}:
+    - task: SonarQubeAnalyze@6
+      displayName: '📊 SonarQube — Run Analysis'
+      continueOnError: true
+
+    - task: SonarQubePublish@6
+      displayName: '📊 SonarQube — Publish Quality Gate'
+      inputs:
+        pollingTimeoutSec: '300'
+      continueOnError: true
+      # Si se desea que el pipeline falle cuando no pase el Quality Gate,
+      # cambiar continueOnError a false.
 
   # ===========================================================================
   # SECCIÓN 4: SECURITY — Escaneo de seguridad

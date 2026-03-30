@@ -93,6 +93,23 @@ parameters:
     type: boolean
     default: true
 
+  # ─── SonarQube ────────────────────────────────────────────────
+  - name: enableSonarQube
+    type: boolean
+    default: false
+
+  - name: sonarQubeServiceConnection
+    type: string
+    default: 'sc-sonarqube'
+
+  - name: sonarQubeProjectKey
+    type: string
+    default: ''
+
+  - name: sonarQubeProjectName
+    type: string
+    default: ''
+
   # ─── Steps adicionales ────────────────────────────────────────
   - name: prePublishSteps
     type: stepList
@@ -126,5 +143,10 @@ stages:
               # Seguridad
               enableSecurityScan: ${{ parameters.enableSecurityScan }}
               enableDependencyScan: ${{ parameters.enableDependencyScan }}
+              # SonarQube
+              enableSonarQube: ${{ parameters.enableSonarQube }}
+              sonarQubeServiceConnection: ${{ parameters.sonarQubeServiceConnection }}
+              sonarQubeProjectKey: ${{ parameters.sonarQubeProjectKey }}
+              sonarQubeProjectName: ${{ parameters.sonarQubeProjectName }}
               # Custom
               prePublishSteps: ${{ parameters.prePublishSteps }}
