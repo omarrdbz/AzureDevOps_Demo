@@ -1,9 +1,26 @@
 # =============================================================================
-# PIPELINE EJEMPLO: Aplicación Web Node.js (CI + CD)
+# PIPELINE EJEMPLO: Aplicación Web Node.js (CI + SAST + CD)
 # =============================================================================
 # Tecnología:  Node.js (React, Angular, Vue, Next.js, Express, etc.)
-# Flujo:       CI (Build) → CD Test → CD Prod
-# Agentes:     CI en Microsoft-hosted, CD en Self-hosted
+# Flujo:       CI (Build+SCA+Package) → SAST (Fortify) → CD Test → CD Prod
+# Agentes:     CI en Microsoft-hosted, SAST y CD en Self-hosted
+#
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  FLUJO HÍBRIDO DE SEGURIDAD:                                           ║
+# ║                                                                         ║
+# ║  Stage 1 (CI)   — MS-hosted (CON internet):                            ║
+# ║    → Build + Test + Snyk SCA + Fortify ScanCentral Package             ║
+# ║                                                                         ║
+# ║  Stage 2 (SAST) — Self-hosted (SIN internet, red Fortify):             ║
+# ║    → Upload scancentral-pkg.zip a Fortify Controller on-prem           ║
+# ║    → Quality Gate contra Fortify SSC                                    ║
+# ║                                                                         ║
+# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + snyk.io:443):              ║
+# ║    → Deploy a Test via WebDeploy + Snyk DAST                           ║
+# ║                                                                         ║
+# ║  Stage 4 (CD)   — Self-hosted (acceso IIS):                            ║
+# ║    → Deploy a Prod via WebDeploy (requiere aprobación)                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 #
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  INSTRUCCIONES PARA ADAPTAR A TU PROYECTO:                              ║
@@ -25,7 +42,16 @@
 # VARIABLE GROUPS REQUERIDOS: (misma estructura que .NET)
 #   vg-miapp-test / vg-miapp-prod
 #     - WebsiteName, SiteUrl, WebDeployUser, WebDeployPassword 🔒
+#     - SnykToken 🔒 (para DAST)
 #     - (Tus variables: NODE_ENV, API_URL, etc.)
+#
+#   vg-fortify
+#     - FortifyScanCentralToken 🔒
+#     - FortifySSCToken 🔒
+#
+# EXTENSIONES REQUERIDAS:
+#   - Snyk Security Scan: https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
+#   - Fortify:            https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
 # =============================================================================
 
 name: '$(Date:yyyyMMdd).$(Rev:r)'
@@ -48,7 +74,7 @@ pr: none
 # =============================================================================
 stages:
   # ────────────────────────────────────────────────────────────────
-  # STAGE 1: CI — Build, Test, Scan, Publish
+  # STAGE 1: CI — Build, Test, Snyk SCA, Fortify Package
   # Agente: Microsoft-hosted (ubuntu-latest para Node.js)
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-ci.yml
@@ -61,12 +87,36 @@ stages:
       testScript: 'test'                   # <!-- CAMBIAR -->
       outputFolder: 'dist'                 # <!-- CAMBIAR a la carpeta de salida de tu build -->
       artifactName: 'MiAppNode'            # <!-- CAMBIAR -->
-      # Nota: MSDO puede requerir windows-latest para algunas herramientas.
-      # Si el security scan falla en ubuntu, cambiar vmImage a 'windows-latest'.
-      enableSecurityScan: true
+      # ── Snyk SCA ──
+      enableSnykSCA: true
+      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR -->
+      snykFailOnIssues: false
+      enableNativeDependencyScan: true     # npm audit como alternativa
+      # ── Fortify ScanCentral Package ──
+      enableFortifyPackage: true
+      fortifyBuildId: 'MiAppNode'          # <!-- CAMBIAR -->
 
   # ────────────────────────────────────────────────────────────────
-  # STAGE 2: CD — Deploy a Test
+  # STAGE 2: SAST — Fortify ScanCentral Upload & Quality Gate
+  # Agente: Self-hosted (On-Prem) — SIN internet
+  # ────────────────────────────────────────────────────────────────
+  - template: ../templates/stage-sast.yml
+    parameters:
+      pool: 'Pool-Test'                    # <!-- CAMBIAR -->
+      dependsOn: 'CI'
+      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
+      fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'  # <!-- CAMBIAR -->
+      fortifyScanCentralToken: $(FortifyScanCentralToken)
+      fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'   # <!-- CAMBIAR -->
+      fortifySSCAuthToken: $(FortifySSCToken)
+      fortifyAppName: 'MiAppNode'          # <!-- CAMBIAR -->
+      fortifyAppVersion: '1.0'             # <!-- CAMBIAR -->
+      qualityGateEnabled: true
+      qualityGateMaxCritical: 0
+      qualityGateMaxHigh: 0
+
+  # ────────────────────────────────────────────────────────────────
+  # STAGE 3: CD — Deploy a Test + Snyk DAST
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
@@ -77,10 +127,14 @@ stages:
       deployPath: 'C:\inetpub\wwwroot\MiAppNode'      # <!-- CAMBIAR -->
       backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
       healthCheckEndpoint: '/'             # <!-- CAMBIAR — '/' si no hay /health -->
-      dependsOn: 'CI'
+      dependsOn: 'SAST'
+      # ── Snyk DAST ──
+      enableSnykDAST: true
+      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR -->
+      snykDastFailOnIssues: false
 
   # ────────────────────────────────────────────────────────────────
-  # STAGE 3: CD — Deploy a Producción
+  # STAGE 4: CD — Deploy a Producción
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
@@ -93,3 +147,4 @@ stages:
       healthCheckEndpoint: '/'
       dependsOn: 'CD_Test'
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
+      enableSnykDAST: false

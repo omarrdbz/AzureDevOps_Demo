@@ -1,5 +1,5 @@
 # =============================================================================
-# TEMPLATE: Stage CD — Wrapper para Deploy a IIS
+# TEMPLATE: Stage CD — Wrapper para Deploy a IIS + Snyk DAST
 # =============================================================================
 # Capa:       Stage (intermedia — se invoca desde el pipeline principal)
 # Propósito:  Encapsular el template de steps CD con environment, approvals,
@@ -10,11 +10,16 @@
 #   1. Ejecuta en un agente self-hosted dentro de la red corporativa
 #   2. Descarga el artefacto inmutable creado en CI
 #   3. Hace backup, despliega via Web Deploy y verifica salud de la app
+#   4. Opcionalmente ejecuta Snyk DAST contra la URL desplegada
 #
 # APROBACIONES:
 #   Las aprobaciones se configuran en Azure DevOps > Pipelines > Environments.
 #   No se configuran en YAML — se gestionan como "checks" del Environment.
 #   Recomendación: Test con aprobación opcional, Prod con aprobación obligatoria.
+#
+# REQUISITOS DE RED (agente on-prem):
+#   ✅ Acceso a servidores IIS internos (Web Deploy)
+#   ✅ Acceso a snyk.io:443 (si Snyk DAST habilitado)
 #
 # USO:
 #   - template: templates/stage-cd.yml
@@ -86,28 +91,28 @@ parameters:
     type: number
     default: 5
 
-  # ─── OWASP ZAP (DAST) ────────────────────────────────────────
-  - name: enableDAST
+  # ─── Snyk DAST ────────────────────────────────────────────────
+  - name: enableSnykDAST
     type: boolean
     default: false
 
-  - name: dastTargetUrl
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+
+  - name: snykDastTargetUrl
     type: string
     default: ''
 
-  - name: dastScanType
-    type: string
-    default: 'baseline'
-
-  - name: dastFailOnRisk
-    type: string
-    default: 'High'
+  - name: snykDastFailOnIssues
+    type: boolean
+    default: false
 
   # ─── Control de flujo entre stages ───────────────────────────
   - name: dependsOn
     type: string
     default: 'CI'
-    # Stage del que depende este stage (ej: 'CI', 'CD_Test')
+    # Stage del que depende este stage (ej: 'CI', 'SAST', 'CD_Test')
 
   - name: condition
     type: string
@@ -152,8 +157,8 @@ stages:
                     healthCheckDelaySeconds: ${{ parameters.healthCheckDelaySeconds }}
                     enableAutoRollback: ${{ parameters.enableAutoRollback }}
                     maxBackups: ${{ parameters.maxBackups }}
-                    # DAST
-                    enableDAST: ${{ parameters.enableDAST }}
-                    dastTargetUrl: ${{ parameters.dastTargetUrl }}
-                    dastScanType: ${{ parameters.dastScanType }}
-                    dastFailOnRisk: ${{ parameters.dastFailOnRisk }}
+                    # Snyk DAST
+                    enableSnykDAST: ${{ parameters.enableSnykDAST }}
+                    snykServiceConnection: ${{ parameters.snykServiceConnection }}
+                    snykDastTargetUrl: ${{ parameters.snykDastTargetUrl }}
+                    snykDastFailOnIssues: ${{ parameters.snykDastFailOnIssues }}

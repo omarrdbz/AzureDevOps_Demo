@@ -1,20 +1,41 @@
 # =============================================================================
-# TEMPLATE: Steps de CI — Build, Test, Scan & Publish
+# TEMPLATE: Steps de CI — Build, Test, SCA & Fortify Package
 # =============================================================================
 # Capa:       Steps (la más baja — se invoca desde stage-ci.yml)
-# Propósito:  Compilar, ejecutar tests, escanear seguridad y publicar artefacto
+# Propósito:  Compilar, ejecutar tests, escanear dependencias (Snyk SCA),
+#             empaquetar código para Fortify ScanCentral, y publicar artefactos
 # Tecnologías soportadas: dotnet | nodejs | custom
 # Principio:  "Compila una vez, despliega múltiples veces" (artefacto inmutable)
 #
+# ESTRATEGIA DE SEGURIDAD HÍBRIDA:
+#   ┌──────────────────────────────────────────────────────────────────┐
+#   │  Este template (CI — MS-hosted, CON internet):                  │
+#   │    → Snyk SCA: escaneo de dependencias (NuGet/npm) vía SaaS    │
+#   │    → Fortify ScanCentral package: empaquetado offline del código│
+#   │                                                                  │
+#   │  Stage SAST posterior (Self-hosted, SIN internet):               │
+#   │    → Envía scancentral-pkg.zip al controlador Fortify on-prem  │
+#   │                                                                  │
+#   │  Stage CD posterior (Self-hosted):                               │
+#   │    → Snyk DAST post-deploy contra la URL interna                │
+#   └──────────────────────────────────────────────────────────────────┘
+#
 # REQUISITOS:
 #   - Agente Microsoft-hosted con las herramientas de la tecnología elegida
-#   - Extensión "Microsoft Security DevOps" instalada en la organización
-#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=MicrosoftSecurityDevOps.microsoft-security-devops-azdevops)
+#   - Extensión "Snyk Security Scan" instalada en la organización
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan)
+#   - Service Connection tipo Snyk configurado (default: 'sc-snyk')
+#   - Extensión "Fortify" instalada en la organización
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps)
+#
+# ARTEFACTOS PUBLICADOS:
+#   1. {artifactName}-{BuildNumber}-{Branch} → Binario/app compilada (para CD)
+#   2. FortifyPackage-{BuildNumber}          → scancentral-pkg.zip (para SAST)
 #
 # USO:
 #   - template: templates/steps-ci.yml
 #     parameters:
-#       technology: 'dotnet'          # o 'nodejs' o 'custom'
+#       technology: 'dotnet'
 #       projectPath: 'src/MiApp/MiApp.csproj'
 #       artifactName: 'MiApp'
 # =============================================================================
@@ -88,40 +109,48 @@ parameters:
     default: 'dist'
     # Carpeta de salida del build (se publica como artefacto)
 
-  # ─── Parámetros de seguridad ─────────────────────────────────
-  - name: enableSecurityScan
+  # ─── Seguridad — Snyk SCA ────────────────────────────────────
+  - name: enableSnykSCA
     type: boolean
     default: true
-    # SAST con Microsoft Security DevOps (MSDO)
-    # Migración futura: reemplazar por Snyk (ver sección SNYK más abajo)
+    # Escaneo de dependencias (SCA) con Snyk Open Source.
+    # Requiere: extensión Snyk + Service Connection 'sc-snyk'
+    # Analiza: NuGet packages (.NET) o npm/yarn deps (Node.js)
 
-  - name: enableDependencyScan
-    type: boolean
-    default: true
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+    # Nombre del Service Connection configurado para Snyk en Azure DevOps.
+    # Crear en: Project Settings > Service connections > New > Snyk
 
-  # ─── SonarQube (análisis estático de calidad y seguridad) ────
-  - name: enableSonarQube
+  - name: snykFailOnIssues
     type: boolean
     default: false
-    # Requiere: extensión SonarQube instalada en Azure DevOps
-    # Requiere: Service Connection tipo SonarQube ('sc-sonarqube')
-    # Requiere: proyecto creado en SonarQube con la projectKey adecuada
-    # Ver README.md — Sección "Integración con SonarQube" para detalles
+    # Si true, el pipeline falla cuando Snyk encuentre vulnerabilidades.
+    # Recomendación: false inicialmente, migrar a true cuando se estabilice.
 
-  - name: sonarQubeServiceConnection
-    type: string
-    default: 'sc-sonarqube'
-    # Nombre de la Service Connection de tipo SonarQube
+  # ─── Seguridad — Escaneo nativo de dependencias (alternativa) ─
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
+    # Escaneo nativo como alternativa/complemento a Snyk:
+    #   .NET:    dotnet list package --vulnerable
+    #   Node.js: npm audit
+    # Útil cuando Snyk no está disponible o como segunda opinión.
 
-  - name: sonarQubeProjectKey
+  # ─── Fortify ScanCentral — Empaquetado offline ────────────────
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
+    # Empaqueta el código compilado para análisis SAST con Fortify ScanCentral.
+    # El paquete se envía al controlador on-prem en el stage SAST posterior.
+    # Requiere: extensión Fortify instalada desde el Marketplace.
+
+  - name: fortifyBuildId
     type: string
     default: ''
-    # Clave del proyecto en SonarQube (ej: 'mi-org_mi-app')
-
-  - name: sonarQubeProjectName
-    type: string
-    default: ''
-    # Nombre legible del proyecto en SonarQube
+    # Identificador del build para ScanCentral.
+    # Si vacío, se usa artifactName como fallback.
 
   # ─── Steps adicionales (inyección de steps custom antes del publish) ───
   - name: prePublishSteps
@@ -133,22 +162,13 @@ steps:
   # SECCIÓN 1: SETUP — Instalar herramientas según tecnología
   # ===========================================================================
 
-  # ─── .NET: Instalar SDKs necesarios ─────────────────────────────────────
+  # ─── .NET: Instalar SDK necesario ───────────────────────────────────────
   - ${{ if eq(parameters.technology, 'dotnet') }}:
-    # SDK 8.x siempre necesario para Microsoft Security DevOps (MSDO)
     - task: UseDotNet@2
-      displayName: '🔧 Instalar .NET SDK 8.x (requerido por MSDO)'
+      displayName: '🔧 Instalar .NET SDK ${{ parameters.dotnetVersion }}'
       inputs:
         packageType: 'sdk'
-        version: '8.x'
-
-    # SDK de la versión del proyecto (si es diferente a 8.x)
-    - ${{ if ne(parameters.dotnetVersion, '8.x') }}:
-      - task: UseDotNet@2
-        displayName: '🔧 Instalar .NET SDK ${{ parameters.dotnetVersion }}'
-        inputs:
-          packageType: 'sdk'
-          version: '${{ parameters.dotnetVersion }}'
+        version: '${{ parameters.dotnetVersion }}'
 
   # ─── Node.js: Instalar runtime ──────────────────────────────────────────
   - ${{ if eq(parameters.technology, 'nodejs') }}:
@@ -156,33 +176,6 @@ steps:
       displayName: '🔧 Instalar Node.js ${{ parameters.nodeVersion }}'
       inputs:
         versionSpec: '${{ parameters.nodeVersion }}'
-
-  # ===========================================================================
-  # SECCIÓN 1.5: SONARQUBE PREPARE (debe ejecutarse ANTES del build)
-  # ===========================================================================
-  # SonarQube necesita "envolver" el build: Prepare → Build → Analyze.
-  # Por eso Prepare se ejecuta aquí, antes de la sección de Build.
-  #
-  # REQUISITOS para habilitar SonarQube:
-  #   1. Instalar extensión "SonarQube" desde Azure DevOps Marketplace
-  #      https://marketplace.visualstudio.com/items?itemName=SonarSource.sonarqube
-  #   2. Crear Service Connection tipo "SonarQube" en Project Settings
-  #   3. Crear el proyecto en tu instancia de SonarQube
-  #   4. Pasar enableSonarQube: true y los parámetros sonarQube*
-  - ${{ if eq(parameters.enableSonarQube, true) }}:
-    - task: SonarQubePrepare@6
-      displayName: '📊 SonarQube — Prepare Analysis'
-      inputs:
-        SonarQube: '${{ parameters.sonarQubeServiceConnection }}'
-        scannerMode: 'MSBuild'           # Para .NET. Ver nota abajo para Node.js.
-        projectKey: '${{ parameters.sonarQubeProjectKey }}'
-        projectName: '${{ parameters.sonarQubeProjectName }}'
-        # ── Para Node.js, cambiar scannerMode a 'CLI' y agregar:
-        #    scannerMode: 'CLI'
-        #    configMode: 'manual'
-        #    cliProjectKey: '${{ parameters.sonarQubeProjectKey }}'
-        #    cliProjectName: '${{ parameters.sonarQubeProjectName }}'
-        #    cliSources: '.'
 
   # ===========================================================================
   # SECCIÓN 2: BUILD — Compilar según tecnología
@@ -236,52 +229,32 @@ steps:
       continueOnError: true
 
   # ===========================================================================
-  # SECCIÓN 3.5: SONARQUBE ANALYZE (debe ejecutarse DESPUÉS del build y tests)
+  # SECCIÓN 4: SECURITY — Snyk SCA (Análisis de Composición de Software)
   # ===========================================================================
-  # Ejecuta el análisis y publica resultados al servidor SonarQube.
-  - ${{ if eq(parameters.enableSonarQube, true) }}:
-    - task: SonarQubeAnalyze@6
-      displayName: '📊 SonarQube — Run Analysis'
-      continueOnError: true
-
-    - task: SonarQubePublish@6
-      displayName: '📊 SonarQube — Publish Quality Gate'
+  # Escanea dependencias de terceros (NuGet, npm) en busca de
+  # vulnerabilidades conocidas usando Snyk Open Source (SaaS).
+  #
+  # REQUISITOS:
+  #   1. Extensión "Snyk Security Scan" instalada desde el Marketplace
+  #      https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
+  #   2. Service Connection tipo Snyk configurado en Project Settings
+  #   3. El agente MS-hosted tiene salida a internet (snyk.io:443)
+  - ${{ if eq(parameters.enableSnykSCA, true) }}:
+    - task: SnykSecurityScan@1
+      displayName: '🛡️ SCA — Snyk Open Source'
       inputs:
-        pollingTimeoutSec: '300'
-      continueOnError: true
-      # Si se desea que el pipeline falle cuando no pase el Quality Gate,
-      # cambiar continueOnError a false.
-
-  # ===========================================================================
-  # SECCIÓN 4: SECURITY — Escaneo de seguridad
-  # ===========================================================================
-
-  # ─── SAST: Microsoft Security DevOps ────────────────────────────────────
-  # Herramienta actual. Para migrar a Snyk, reemplazar este bloque por:
-  #   - task: SnykSecurityScan@1
-  #     displayName: 'SAST — Snyk Code'
-  #     inputs:
-  #       serviceConnectionEndpoint: 'sc-snyk'
-  #       testType: 'code'
-  #       failOnIssues: false        # Cambiar a true cuando se estabilice
-  #     continueOnError: true
-  - ${{ if eq(parameters.enableSecurityScan, true) }}:
-    - task: MicrosoftSecurityDevOps@1
-      displayName: '🛡️ SAST — Microsoft Security DevOps'
-      inputs:
-        categories: 'code'
+        serviceConnectionEndpoint: '${{ parameters.snykServiceConnection }}'
+        testType: 'app'
+        failOnIssues: ${{ parameters.snykFailOnIssues }}
+        # monitorOnBuild: true  # Descomentar para monitorear en el dashboard de Snyk
       continueOnError: true
 
-  # ─── Dependency Scan: según tecnología ──────────────────────────────────
-  # Para migrar a Snyk, reemplazar este bloque por:
-  #   - task: SnykSecurityScan@1
-  #     displayName: 'Dependency Scan — Snyk Open Source'
-  #     inputs:
-  #       serviceConnectionEndpoint: 'sc-snyk'
-  #       testType: 'app'
-  #       failOnIssues: false
-  #     continueOnError: true
-  - ${{ if eq(parameters.enableDependencyScan, true) }}:
+  # ===========================================================================
+  # SECCIÓN 4.5: DEPENDENCY SCAN NATIVO (alternativa/complemento a Snyk)
+  # ===========================================================================
+  # Herramientas nativas del ecosistema como alternativa cuando Snyk no está
+  # disponible, o como segunda capa de verificación.
+  - ${{ if eq(parameters.enableNativeDependencyScan, true) }}:
     # .NET: auditoría de paquetes NuGet
     - ${{ if eq(parameters.technology, 'dotnet') }}:
       - task: DotNetCoreCLI@2
@@ -300,7 +273,74 @@ steps:
         continueOnError: true
 
   # ===========================================================================
-  # SECCIÓN 5: STEPS ADICIONALES (pre-publish hook)
+  # SECCIÓN 5: FORTIFY SCANCENTRAL — Empaquetado Offline
+  # ===========================================================================
+  # Empaqueta el código fuente compilado en un archivo ZIP portátil
+  # (scancentral-pkg.zip) que será enviado al controlador Fortify
+  # ScanCentral on-prem en el stage SAST posterior.
+  #
+  # ¿Por qué empaquetar aquí?
+  #   - El agente MS-hosted tiene el código y las herramientas de build
+  #   - El controlador Fortify está on-prem SIN internet
+  #   - El paquete viaja como artefacto del pipeline (via Azure DevOps)
+  #
+  # REQUISITOS:
+  #   1. Extensión "Fortify" instalada desde Azure DevOps Marketplace
+  #      https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
+  #   2. La extensión provee el cliente ScanCentral en el agente
+  - ${{ if eq(parameters.enableFortifyPackage, true) }}:
+    # ── .NET: empaquetar con build tool msbuild ──────────────────
+    - ${{ if eq(parameters.technology, 'dotnet') }}:
+      - powershell: |
+          $buildId    = "${{ coalesce(parameters.fortifyBuildId, parameters.artifactName) }}"
+          $outputFile = "$(Build.ArtifactStagingDirectory)\scancentral-pkg.zip"
+
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  FORTIFY SCANCENTRAL — Package (Offline)"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  Build ID:    $buildId"
+          Write-Host "  Build Tool:  msbuild"
+          Write-Host "  Project:     ${{ parameters.projectPath }}"
+          Write-Host "  Output:      $outputFile"
+          Write-Host "═══════════════════════════════════════════════"
+
+          scancentral package `
+              -bt msbuild `
+              -bf "${{ parameters.projectPath }}" `
+              -b $buildId `
+              -o $outputFile
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "##vso[task.logissue type=error]ScanCentral package falló (exit code: $LASTEXITCODE)"
+              exit $LASTEXITCODE
+          }
+
+          $size = (Get-Item $outputFile).Length / 1MB
+          Write-Host "✅ Paquete creado: $outputFile ($([math]::Round($size, 2)) MB)"
+        displayName: '📦 Fortify ScanCentral — Package (.NET)'
+
+    # ── Node.js: empaquetar sin build tool específico ────────────
+    - ${{ if eq(parameters.technology, 'nodejs') }}:
+      - script: |
+          echo "═══════════════════════════════════════════════"
+          echo "  FORTIFY SCANCENTRAL — Package (Offline)"
+          echo "═══════════════════════════════════════════════"
+          echo "  Build Tool:  none"
+          echo "  Output:      $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip"
+          echo "═══════════════════════════════════════════════"
+
+          scancentral package \
+              -bt none \
+              -o "$(Build.ArtifactStagingDirectory)/scancentral-pkg.zip"
+        displayName: '📦 Fortify ScanCentral — Package (Node.js)'
+
+    # ── Publicar paquete ScanCentral como artefacto separado ─────
+    - publish: $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip
+      artifact: 'FortifyPackage-$(Build.BuildNumber)'
+      displayName: '📄 Publicar Paquete ScanCentral'
+
+  # ===========================================================================
+  # SECCIÓN 6: STEPS ADICIONALES (pre-publish hook)
   # ===========================================================================
   # Permite inyectar steps personalizados antes de publicar el artefacto.
   # Útil para: transformaciones de config, análisis adicionales, etc.
@@ -308,7 +348,7 @@ steps:
     - ${{ step }}
 
   # ===========================================================================
-  # SECCIÓN 6: PUBLISH — Generar y publicar artefacto inmutable
+  # SECCIÓN 7: PUBLISH — Generar y publicar artefacto inmutable de la app
   # ===========================================================================
 
   # ─── .NET: dotnet publish ───────────────────────────────────────────────
@@ -318,7 +358,7 @@ steps:
       inputs:
         command: 'publish'
         projects: '${{ parameters.projectPath }}'
-        arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)/app'
         publishWebProjects: false
         zipAfterPublish: false
         modifyOutputPath: false
@@ -330,11 +370,11 @@ steps:
       inputs:
         SourceFolder: '${{ parameters.outputFolder }}'
         Contents: '**'
-        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/app'
 
-  # ─── Publicar artefacto versionado (todas las tecnologías) ──────────────
+  # ─── Publicar artefacto versionado de la aplicación ──────────────────────
   # Nombre incluye BuildNumber y branch para trazabilidad completa.
   # Este artefacto se descarga tal cual en cada environment de CD.
-  - publish: $(Build.ArtifactStagingDirectory)
+  - publish: $(Build.ArtifactStagingDirectory)/app
     artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
-    displayName: '📦 Publicar Artefacto Versionado'
+    displayName: '📦 Publicar Artefacto de Aplicación'

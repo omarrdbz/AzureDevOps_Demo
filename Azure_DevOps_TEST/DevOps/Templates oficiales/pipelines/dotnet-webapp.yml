@@ -1,9 +1,27 @@
 # =============================================================================
-# PIPELINE EJEMPLO: Aplicación Web .NET (CI + CD)
+# PIPELINE EJEMPLO: Aplicación Web .NET (CI + SAST + CD)
 # =============================================================================
 # Tecnología:  .NET Core / .NET 5+
-# Flujo:       CI (Build) → CD Test → CD Prod
-# Agentes:     CI en Microsoft-hosted, CD en Self-hosted
+# Flujo:       CI (Build+SCA+Package) → SAST (Fortify) → CD Test → CD Prod
+# Agentes:     CI en Microsoft-hosted, SAST y CD en Self-hosted
+#
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  FLUJO HÍBRIDO DE SEGURIDAD:                                           ║
+# ║                                                                         ║
+# ║  Stage 1 (CI)   — MS-hosted (CON internet):                            ║
+# ║    → Build + Test + Snyk SCA + Fortify ScanCentral Package             ║
+# ║    → Publica: artefacto app + scancentral-pkg.zip                      ║
+# ║                                                                         ║
+# ║  Stage 2 (SAST) — Self-hosted (SIN internet, red Fortify):             ║
+# ║    → Upload scancentral-pkg.zip a Fortify Controller on-prem           ║
+# ║    → Quality Gate contra Fortify SSC                                    ║
+# ║                                                                         ║
+# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + snyk.io:443):              ║
+# ║    → Deploy a Test via WebDeploy + Snyk DAST                           ║
+# ║                                                                         ║
+# ║  Stage 4 (CD)   — Self-hosted (acceso IIS):                            ║
+# ║    → Deploy a Prod via WebDeploy (requiere aprobación)                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 #
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  INSTRUCCIONES PARA ADAPTAR A TU PROYECTO:                              ║
@@ -21,14 +39,23 @@
 #     - SiteUrl              (URL completa, ej: "https://miapp-test.empresa.local")
 #     - WebDeployUser        (cuenta de servicio)
 #     - WebDeployPassword    🔒 secreto
+#     - SnykToken            🔒 secreto (token de API de Snyk para DAST)
 #     - (Tus variables de app: ConnectionStrings, API keys, etc.)
 #
 #   vg-miapp-prod:
 #     - (Mismas variables, con valores de producción)
 #
+#   vg-fortify:
+#     - FortifyScanCentralToken  🔒 secreto (token para ScanCentral Controller)
+#     - FortifySSCToken          🔒 secreto (token para Fortify SSC API)
+#
 # ENVIRONMENTS REQUERIDOS (crear en Pipelines > Environments):
 #   - Test  → Aprobación: Opcional
 #   - Prod  → Aprobación: Obligatoria (mínimo 1 aprobador)
+#
+# EXTENSIONES REQUERIDAS (instalar en Azure DevOps Marketplace):
+#   - Snyk Security Scan: https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
+#   - Fortify:            https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
 # =============================================================================
 
 # ─── Nombre del build (versionado automático por fecha) ─────────
@@ -56,8 +83,8 @@ pr: none
 # =============================================================================
 stages:
   # ────────────────────────────────────────────────────────────────
-  # STAGE 1: CI — Build, Test, Scan, Publish
-  # Agente: Microsoft-hosted (windows-latest)
+  # STAGE 1: CI — Build, Test, Snyk SCA, Fortify Package
+  # Agente: Microsoft-hosted (windows-latest) — CON internet
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-ci.yml
     parameters:
@@ -68,12 +95,43 @@ stages:
       artifactName: 'MiApp'               # <!-- CAMBIAR al nombre de tu aplicación -->
       buildConfiguration: 'Release'
       runTests: true
-      # testProjectPath: 'src/MiApp.Tests/MiApp.Tests.csproj'  # Descomentar si el proyecto de tests no se detecta automáticamente
+      # testProjectPath: 'src/MiApp.Tests/MiApp.Tests.csproj'  # Descomentar si no se detecta automáticamente
+      # ── Snyk SCA (análisis de dependencias) ──
+      enableSnykSCA: true
+      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR si tu Service Connection tiene otro nombre -->
+      snykFailOnIssues: false              # Cambiar a true cuando se estabilice
+      enableNativeDependencyScan: true     # NuGet Audit como alternativa/complemento
+      # ── Fortify ScanCentral Package (empaquetado offline) ──
+      enableFortifyPackage: true
+      fortifyBuildId: 'MiApp'              # <!-- CAMBIAR al nombre de tu aplicación -->
 
   # ────────────────────────────────────────────────────────────────
-  # STAGE 2: CD — Deploy a Test
+  # STAGE 2: SAST — Fortify ScanCentral Upload & Quality Gate
+  # Agente: Self-hosted (On-Prem) — SIN internet, CON acceso a Fortify
+  # Condición: Depende de que CI sea exitoso
+  # ────────────────────────────────────────────────────────────────
+  - template: ../templates/stage-sast.yml
+    parameters:
+      pool: 'Pool-Test'                    # <!-- CAMBIAR al nombre de tu Agent Pool on-prem -->
+      dependsOn: 'CI'
+      artifactName: 'MiApp'               # <!-- CAMBIAR — debe coincidir con CI -->
+      # ── Fortify ScanCentral Controller ──
+      fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'  # <!-- CAMBIAR -->
+      fortifyScanCentralToken: $(FortifyScanCentralToken)   # Variable secreta en Library
+      # ── Fortify SSC (Quality Gate) ──
+      fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'   # <!-- CAMBIAR -->
+      fortifySSCAuthToken: $(FortifySSCToken)               # Variable secreta en Library
+      fortifyAppName: 'MiApp'              # <!-- CAMBIAR — nombre de app en SSC -->
+      fortifyAppVersion: '1.0'             # <!-- CAMBIAR — versión en SSC -->
+      # ── Quality Gate ──
+      qualityGateEnabled: true
+      qualityGateMaxCritical: 0            # 0 = cero tolerancia a Critical
+      qualityGateMaxHigh: 0                # 0 = cero tolerancia a High
+
+  # ────────────────────────────────────────────────────────────────
+  # STAGE 3: CD — Deploy a Test + Snyk DAST
   # Agente: Self-hosted (Pool-Test)
-  # Aprobación: Según configuración del Environment "Test"
+  # Condición: Depende de que SAST sea exitoso
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
@@ -84,13 +142,18 @@ stages:
       deployPath: 'C:\inetpub\wwwroot\MiApp'          # <!-- CAMBIAR a la ruta de tu app en el servidor -->
       backupPath: 'C:\deploy-backups\MiApp'            # <!-- CAMBIAR -->
       healthCheckEndpoint: '/health'       # <!-- CAMBIAR al endpoint de salud de tu app -->
-      dependsOn: 'CI'
+      dependsOn: 'SAST'
+      # ── Snyk DAST (escaneo dinámico post-deploy) ──
+      enableSnykDAST: true
+      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR si tu Service Connection tiene otro nombre -->
+      snykDastFailOnIssues: false          # Cambiar a true cuando se estabilice
 
   # ────────────────────────────────────────────────────────────────
-  # STAGE 3: CD — Deploy a Producción
+  # STAGE 4: CD — Deploy a Producción
   # Agente: Self-hosted (Pool-Prod)
   # Aprobación: OBLIGATORIA (configurada en Environment "Prod")
   # Branch control: Solo desde main
+  # Condición: Depende de que CD_Test sea exitoso
   # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
@@ -104,3 +167,5 @@ stages:
       dependsOn: 'CD_Test'
       # Solo desplegar a Prod desde la rama main
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
+      # Sin DAST en Prod (ya se escaneó en Test)
+      enableSnykDAST: false

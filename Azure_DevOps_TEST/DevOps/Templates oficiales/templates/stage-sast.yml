@@ -1,0 +1,138 @@
+# =============================================================================
+# TEMPLATE: Stage SAST — Fortify ScanCentral Upload & Quality Gate
+# =============================================================================
+# Capa:       Stage (intermedia — se invoca desde el pipeline principal)
+# Propósito:  Encapsular el template de steps SAST con pool self-hosted on-prem
+# Agente:     Self-hosted (On-Prem, con acceso al controlador Fortify)
+#
+# Este stage:
+#   1. Ejecuta en un agente self-hosted dentro de la red corporativa
+#   2. Descarga ÚNICAMENTE el paquete ScanCentral (no el artefacto de la app)
+#   3. Envía el paquete al controlador Fortify ScanCentral para análisis SAST
+#   4. Espera los resultados y evalúa Quality Gate contra Fortify SSC
+#   5. Falla el pipeline si el Quality Gate no se cumple
+#
+# REQUISITOS DE RED (agente on-prem):
+#   ✅ Acceso al controlador ScanCentral (red interna)
+#   ✅ Acceso a Fortify SSC (red interna)
+#   ❌ NO requiere salida a internet
+#
+# USO:
+#   stages:
+#     - template: templates/stage-sast.yml
+#       parameters:
+#         pool: 'Pool-Test'
+#         artifactName: 'MiApp'
+#         fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'
+#         fortifyScanCentralToken: $(FortifyScanCentralToken)
+#         fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'
+#         fortifySSCAuthToken: $(FortifySSCToken)
+#         fortifyAppName: 'MiApp'
+#         fortifyAppVersion: '1.0'
+#         dependsOn: 'CI'
+# =============================================================================
+
+parameters:
+  # ─── Pool de agente self-hosted (On-Prem) ─────────────────────
+  - name: pool
+    type: string
+    # Nombre del Agent Pool on-prem (ej: 'Pool-Test', 'Pool-Prod')
+
+  # ─── Control de flujo entre stages ────────────────────────────
+  - name: dependsOn
+    type: string
+    default: 'CI'
+    # Stage del que depende (normalmente CI)
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+    # Condición de ejecución
+
+  # ─── Artefacto ────────────────────────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  # ─── Fortify ScanCentral ──────────────────────────────────────
+  - name: fortifyScanCentralUrl
+    type: string
+    default: ''
+
+  - name: fortifyScanCentralToken
+    type: string
+    default: ''
+
+  # ─── Fortify SSC ──────────────────────────────────────────────
+  - name: fortifySSCUrl
+    type: string
+    default: ''
+
+  - name: fortifySSCAuthToken
+    type: string
+    default: ''
+
+  # ─── Aplicación ───────────────────────────────────────────────
+  - name: fortifyAppName
+    type: string
+    default: ''
+
+  - name: fortifyAppVersion
+    type: string
+    default: ''
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  # ─── Quality Gate ─────────────────────────────────────────────
+  - name: qualityGateEnabled
+    type: boolean
+    default: true
+
+  - name: qualityGateMaxCritical
+    type: number
+    default: 0
+
+  - name: qualityGateMaxHigh
+    type: number
+    default: 0
+
+  # ─── Polling ──────────────────────────────────────────────────
+  - name: scanTimeoutMinutes
+    type: number
+    default: 60
+
+  - name: pollIntervalSeconds
+    type: number
+    default: 30
+
+stages:
+  - stage: SAST
+    displayName: 'SAST — Fortify ScanCentral'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+
+    pool:
+      name: ${{ parameters.pool }}
+
+    jobs:
+      - job: FortifySAST
+        displayName: 'Fortify ScanCentral — Upload & Quality Gate'
+        timeoutInMinutes: ${{ parameters.scanTimeoutMinutes }}
+        steps:
+          - template: steps-sast-fortify.yml
+            parameters:
+              artifactName: ${{ parameters.artifactName }}
+              fortifyScanCentralUrl: ${{ parameters.fortifyScanCentralUrl }}
+              fortifyScanCentralToken: ${{ parameters.fortifyScanCentralToken }}
+              fortifySSCUrl: ${{ parameters.fortifySSCUrl }}
+              fortifySSCAuthToken: ${{ parameters.fortifySSCAuthToken }}
+              fortifyAppName: ${{ parameters.fortifyAppName }}
+              fortifyAppVersion: ${{ parameters.fortifyAppVersion }}
+              fortifyBuildId: ${{ parameters.fortifyBuildId }}
+              qualityGateEnabled: ${{ parameters.qualityGateEnabled }}
+              qualityGateMaxCritical: ${{ parameters.qualityGateMaxCritical }}
+              qualityGateMaxHigh: ${{ parameters.qualityGateMaxHigh }}
+              scanTimeoutMinutes: ${{ parameters.scanTimeoutMinutes }}
+              pollIntervalSeconds: ${{ parameters.pollIntervalSeconds }}

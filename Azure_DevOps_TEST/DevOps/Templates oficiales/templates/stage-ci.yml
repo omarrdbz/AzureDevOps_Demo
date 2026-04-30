@@ -1,14 +1,21 @@
 # =============================================================================
-# TEMPLATE: Stage CI — Wrapper para Build, Test, Scan & Publish
+# TEMPLATE: Stage CI — Wrapper para Build, Test, SCA & Fortify Package
 # =============================================================================
 # Capa:       Stage (intermedia — se invoca desde el pipeline principal)
 # Propósito:  Encapsular el template de steps CI con pool y configuración
-# Agente:     Microsoft-hosted (efímero, no tiene acceso a servidores internos)
+# Agente:     Microsoft-hosted (efímero, CON salida a internet)
 #
 # Este stage:
 #   1. Ejecuta en un agente limpio de Microsoft (sin estado previo)
-#   2. Compila, prueba, escanea y publica un artefacto inmutable
-#   3. El artefacto se consume en los stages de CD posteriores
+#   2. Compila, prueba, escanea dependencias (Snyk SCA) y empaqueta
+#      el código para Fortify ScanCentral (offline)
+#   3. Publica 2 artefactos inmutables:
+#      - Aplicación compilada (para CD)
+#      - scancentral-pkg.zip (para SAST)
+#
+# REQUISITOS DE RED (agente MS-hosted):
+#   ✅ Acceso a internet (Snyk SaaS, NuGet, npm)
+#   ❌ NO tiene acceso al controlador Fortify (on-prem)
 #
 # USO:
 #   stages:
@@ -84,29 +91,30 @@ parameters:
     type: string
     default: 'dist'
 
-  # ─── Seguridad ────────────────────────────────────────────────
-  - name: enableSecurityScan
+  # ─── Seguridad — Snyk SCA ────────────────────────────────────
+  - name: enableSnykSCA
     type: boolean
     default: true
 
-  - name: enableDependencyScan
-    type: boolean
-    default: true
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
 
-  # ─── SonarQube ────────────────────────────────────────────────
-  - name: enableSonarQube
+  - name: snykFailOnIssues
     type: boolean
     default: false
 
-  - name: sonarQubeServiceConnection
-    type: string
-    default: 'sc-sonarqube'
+  # ─── Seguridad — Escaneo nativo (alternativa) ────────────────
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
 
-  - name: sonarQubeProjectKey
-    type: string
-    default: ''
+  # ─── Fortify ScanCentral — Empaquetado offline ────────────────
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
 
-  - name: sonarQubeProjectName
+  - name: fortifyBuildId
     type: string
     default: ''
 
@@ -117,12 +125,12 @@ parameters:
 
 stages:
   - stage: CI
-    displayName: 'CI — Build, Test & Scan'
+    displayName: 'CI — Build, Test, SCA & Fortify Package'
     pool:
       vmImage: ${{ parameters.vmImage }}
     jobs:
       - job: Build
-        displayName: 'Build & Publish Artifact'
+        displayName: 'Build, Scan & Publish Artifacts'
         steps:
           - template: steps-ci.yml
             parameters:
@@ -140,13 +148,14 @@ stages:
               buildScript: ${{ parameters.buildScript }}
               testScript: ${{ parameters.testScript }}
               outputFolder: ${{ parameters.outputFolder }}
-              # Seguridad
-              enableSecurityScan: ${{ parameters.enableSecurityScan }}
-              enableDependencyScan: ${{ parameters.enableDependencyScan }}
-              # SonarQube
-              enableSonarQube: ${{ parameters.enableSonarQube }}
-              sonarQubeServiceConnection: ${{ parameters.sonarQubeServiceConnection }}
-              sonarQubeProjectKey: ${{ parameters.sonarQubeProjectKey }}
-              sonarQubeProjectName: ${{ parameters.sonarQubeProjectName }}
+              # Seguridad — Snyk SCA
+              enableSnykSCA: ${{ parameters.enableSnykSCA }}
+              snykServiceConnection: ${{ parameters.snykServiceConnection }}
+              snykFailOnIssues: ${{ parameters.snykFailOnIssues }}
+              # Seguridad — Escaneo nativo
+              enableNativeDependencyScan: ${{ parameters.enableNativeDependencyScan }}
+              # Fortify ScanCentral Package
+              enableFortifyPackage: ${{ parameters.enableFortifyPackage }}
+              fortifyBuildId: ${{ parameters.fortifyBuildId }}
               # Custom
               prePublishSteps: ${{ parameters.prePublishSteps }}
