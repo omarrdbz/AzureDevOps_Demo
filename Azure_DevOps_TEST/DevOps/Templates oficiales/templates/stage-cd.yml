@@ -19,7 +19,7 @@
 #
 # REQUISITOS DE RED (agente on-prem):
 #   ✅ Acceso a servidores IIS internos (Web Deploy)
-#   ✅ Acceso a snyk.io:443 (si Snyk DAST habilitado)
+#   ✅ Acceso a api.probely.com:443 (si Snyk API & Web DAST habilitado)
 #
 # USO:
 #   - template: templates/stage-cd.yml
@@ -91,22 +91,30 @@ parameters:
     type: number
     default: 5
 
-  # ─── Snyk DAST ────────────────────────────────────────────────
-  - name: enableSnykDAST
+  # ─── Snyk API & Web DAST (Probely) ─────────────────────────────
+  - name: enableSnykApiWebDAST
     type: boolean
     default: false
 
-  - name: snykServiceConnection
-    type: string
-    default: 'sc-snyk'
-
-  - name: snykDastTargetUrl
+  - name: snykApiWebTargetId
     type: string
     default: ''
 
-  - name: snykDastFailOnIssues
+  - name: snykApiWebScanProfile
+    type: string
+    default: 'normal'
+
+  - name: snykApiWebTimeoutMinutes
+    type: number
+    default: 60
+
+  - name: snykApiWebSeverityThreshold
+    type: string
+    default: 'HIGH'
+
+  - name: snykApiWebFailOnIssues
     type: boolean
-    default: false
+    default: true
 
   # ─── Control de flujo entre stages ───────────────────────────
   - name: dependsOn
@@ -157,8 +165,10 @@ stages:
                     healthCheckDelaySeconds: ${{ parameters.healthCheckDelaySeconds }}
                     enableAutoRollback: ${{ parameters.enableAutoRollback }}
                     maxBackups: ${{ parameters.maxBackups }}
-                    # Snyk DAST
-                    enableSnykDAST: ${{ parameters.enableSnykDAST }}
-                    snykServiceConnection: ${{ parameters.snykServiceConnection }}
-                    snykDastTargetUrl: ${{ parameters.snykDastTargetUrl }}
-                    snykDastFailOnIssues: ${{ parameters.snykDastFailOnIssues }}
+                    # Snyk API & Web DAST (Probely)
+                    enableSnykApiWebDAST: ${{ parameters.enableSnykApiWebDAST }}
+                    snykApiWebTargetId: ${{ parameters.snykApiWebTargetId }}
+                    snykApiWebScanProfile: ${{ parameters.snykApiWebScanProfile }}
+                    snykApiWebTimeoutMinutes: ${{ parameters.snykApiWebTimeoutMinutes }}
+                    snykApiWebSeverityThreshold: ${{ parameters.snykApiWebSeverityThreshold }}
+                    snykApiWebFailOnIssues: ${{ parameters.snykApiWebFailOnIssues }}

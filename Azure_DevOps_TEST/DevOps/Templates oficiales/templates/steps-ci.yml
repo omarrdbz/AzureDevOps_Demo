@@ -226,7 +226,7 @@ steps:
   - ${{ if and(eq(parameters.technology, 'nodejs'), eq(parameters.runTests, true)) }}:
     - script: ${{ parameters.packageManager }} run ${{ parameters.testScript }}
       displayName: '🧪 Test — ${{ parameters.packageManager }} run ${{ parameters.testScript }}'
-      continueOnError: true
+      # continueOnError: true
 
   # ===========================================================================
   # SECCIÓN 4: SECURITY — Snyk SCA (Análisis de Composición de Software)
@@ -239,6 +239,10 @@ steps:
   #      https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
   #   2. Service Connection tipo Snyk configurado en Project Settings
   #   3. El agente MS-hosted tiene salida a internet (snyk.io:443)
+  # NOTA: Si Snyk no está disponible o el Service
+  # Connection falla, el pipeline falla (fail-closed).
+  # El parámetro snykFailOnIssues controla si vulnerabilidades encontradas
+  # causan fallo; pero errores de infraestructura siempre fallan.
   - ${{ if eq(parameters.enableSnykSCA, true) }}:
     - task: SnykSecurityScan@1
       displayName: '🛡️ SCA — Snyk Open Source'
@@ -247,7 +251,7 @@ steps:
         testType: 'app'
         failOnIssues: ${{ parameters.snykFailOnIssues }}
         # monitorOnBuild: true  # Descomentar para monitorear en el dashboard de Snyk
-      continueOnError: true
+      # continueOnError: true
 
   # ===========================================================================
   # SECCIÓN 4.5: DEPENDENCY SCAN NATIVO (alternativa/complemento a Snyk)

@@ -16,7 +16,7 @@
 # ║    → Upload scancentral-pkg.zip a Fortify Controller on-prem           ║
 # ║    → Quality Gate contra Fortify SSC                                    ║
 # ║                                                                         ║
-# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + snyk.io:443):              ║
+# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + api.probely.com:443):      ║
 # ║    → Deploy a Test via WebDeploy + Snyk DAST                           ║
 # ║                                                                         ║
 # ║  Stage 4 (CD)   — Self-hosted (acceso IIS):                            ║
@@ -39,7 +39,7 @@
 #     - SiteUrl              (URL completa, ej: "https://miapp-test.empresa.local")
 #     - WebDeployUser        (cuenta de servicio)
 #     - WebDeployPassword    🔒 secreto
-#     - SnykToken            🔒 secreto (token de API de Snyk para DAST)
+#     - ProbelyApiKey       🔒 secreto (API Key de Snyk API & Web / Probely para DAST)
 #     - (Tus variables de app: ConnectionStrings, API keys, etc.)
 #
 #   vg-miapp-prod:
@@ -99,7 +99,7 @@ stages:
       # ── Snyk SCA (análisis de dependencias) ──
       enableSnykSCA: true
       snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR si tu Service Connection tiene otro nombre -->
-      snykFailOnIssues: false              # Cambiar a true cuando se estabilice
+      snykFailOnIssues: true               # Fail-closed: el pipeline falla si Snyk encuentra vulnerabilidades
       enableNativeDependencyScan: true     # NuGet Audit como alternativa/complemento
       # ── Fortify ScanCentral Package (empaquetado offline) ──
       enableFortifyPackage: true
@@ -113,6 +113,7 @@ stages:
   - template: ../templates/stage-sast.yml
     parameters:
       pool: 'Pool-Test'                    # <!-- CAMBIAR al nombre de tu Agent Pool on-prem -->
+      variableGroup: 'vg-fortify'           # <!-- CAMBIAR — Variable Group con tokens Fortify -->
       dependsOn: 'CI'
       artifactName: 'MiApp'               # <!-- CAMBIAR — debe coincidir con CI -->
       # ── Fortify ScanCentral Controller ──
@@ -143,10 +144,12 @@ stages:
       backupPath: 'C:\deploy-backups\MiApp'            # <!-- CAMBIAR -->
       healthCheckEndpoint: '/health'       # <!-- CAMBIAR al endpoint de salud de tu app -->
       dependsOn: 'SAST'
-      # ── Snyk DAST (escaneo dinámico post-deploy) ──
-      enableSnykDAST: true
-      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR si tu Service Connection tiene otro nombre -->
-      snykDastFailOnIssues: false          # Cambiar a true cuando se estabilice
+      # ── Snyk API & Web DAST (Probely) ─ solo en Test ──
+      enableSnykApiWebDAST: true
+      snykApiWebTargetId: '<TARGET_ID>'    # <!-- CAMBIAR — obtener de Snyk API & Web > Targets -->
+      snykApiWebScanProfile: 'normal'
+      snykApiWebSeverityThreshold: 'HIGH'
+      snykApiWebFailOnIssues: true          # Fail-closed: falla si DAST encuentra >= HIGH
 
   # ────────────────────────────────────────────────────────────────
   # STAGE 4: CD — Deploy a Producción
@@ -167,5 +170,5 @@ stages:
       dependsOn: 'CD_Test'
       # Solo desplegar a Prod desde la rama main
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
-      # Sin DAST en Prod (ya se escaneó en Test)
-      enableSnykDAST: false
+      # Sin DAST en Prod (ya se escaneo en Test)
+      enableSnykApiWebDAST: false

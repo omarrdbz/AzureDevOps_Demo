@@ -15,7 +15,7 @@
 # ║    → Upload scancentral-pkg.zip a Fortify Controller on-prem           ║
 # ║    → Quality Gate contra Fortify SSC                                    ║
 # ║                                                                         ║
-# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + snyk.io:443):              ║
+# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + api.probely.com:443):      ║
 # ║    → Deploy a Test via WebDeploy + Snyk DAST                           ║
 # ║                                                                         ║
 # ║  Stage 4 (CD)   — Self-hosted (acceso IIS):                            ║
@@ -42,7 +42,7 @@
 # VARIABLE GROUPS REQUERIDOS: (misma estructura que .NET)
 #   vg-miapp-test / vg-miapp-prod
 #     - WebsiteName, SiteUrl, WebDeployUser, WebDeployPassword 🔒
-#     - SnykToken 🔒 (para DAST)
+#     - ProbelyApiKey 🔒 (API Key de Snyk API & Web / Probely para DAST)
 #     - (Tus variables: NODE_ENV, API_URL, etc.)
 #
 #   vg-fortify
@@ -90,7 +90,7 @@ stages:
       # ── Snyk SCA ──
       enableSnykSCA: true
       snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR -->
-      snykFailOnIssues: false
+      snykFailOnIssues: true
       enableNativeDependencyScan: true     # npm audit como alternativa
       # ── Fortify ScanCentral Package ──
       enableFortifyPackage: true
@@ -103,6 +103,7 @@ stages:
   - template: ../templates/stage-sast.yml
     parameters:
       pool: 'Pool-Test'                    # <!-- CAMBIAR -->
+      variableGroup: 'vg-fortify'           # <!-- CAMBIAR — Variable Group con tokens Fortify -->
       dependsOn: 'CI'
       artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
       fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'  # <!-- CAMBIAR -->
@@ -128,10 +129,12 @@ stages:
       backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
       healthCheckEndpoint: '/'             # <!-- CAMBIAR — '/' si no hay /health -->
       dependsOn: 'SAST'
-      # ── Snyk DAST ──
-      enableSnykDAST: true
-      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR -->
-      snykDastFailOnIssues: false
+      # ── Snyk API & Web DAST (Probely) ─ solo en Test ──
+      enableSnykApiWebDAST: true
+      snykApiWebTargetId: '<TARGET_ID>'    # <!-- CAMBIAR -->
+      snykApiWebScanProfile: 'normal'
+      snykApiWebSeverityThreshold: 'HIGH'
+      snykApiWebFailOnIssues: true
 
   # ────────────────────────────────────────────────────────────────
   # STAGE 4: CD — Deploy a Producción
@@ -147,4 +150,4 @@ stages:
       healthCheckEndpoint: '/'
       dependsOn: 'CD_Test'
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
-      enableSnykDAST: false
+      enableSnykApiWebDAST: false

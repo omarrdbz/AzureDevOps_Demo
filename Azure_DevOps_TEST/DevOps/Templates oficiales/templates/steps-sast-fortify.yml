@@ -223,16 +223,18 @@ steps:
             $versionId = $response.data[0].id
 
             if (-not $versionId) {
-                Write-Host "##vso[task.logissue type=warning]No se encontró la versión '$appVersion' de '$appName' en SSC."
+                Write-Host "##vso[task.logissue type=error]No se encontró la versión '$appVersion' de '$appName' en SSC."
+                Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse sin una versión válida en SSC."
                 Write-Host "Verificar que la aplicación y versión existan en Fortify SSC."
-                exit 0
+                exit 1
             }
 
             Write-Host "  Version ID:    $versionId"
         } catch {
-            Write-Host "##vso[task.logissue type=warning]Error consultando SSC: $($_.Exception.Message)"
+            Write-Host "##vso[task.logissue type=error]Error consultando SSC: $($_.Exception.Message)"
+            Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse — SSC inaccesible."
             Write-Host "Verificar fortifySSCUrl y token de autenticación."
-            exit 0
+            exit 1
         }
 
         # ── Paso 3b: Obtener resumen de issues por severidad ──
@@ -254,8 +256,9 @@ steps:
                 }
             }
         } catch {
-            Write-Host "##vso[task.logissue type=warning]Error obteniendo issues: $($_.Exception.Message)"
-            exit 0
+            Write-Host "##vso[task.logissue type=error]Error obteniendo issues de SSC: $($_.Exception.Message)"
+            Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse — datos de vulnerabilidades no disponibles."
+            exit 1
         }
 
         Write-Host ""

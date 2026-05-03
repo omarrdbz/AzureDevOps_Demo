@@ -1,18 +1,18 @@
 graph LR
-    subgraph "Snyk Cloud (Internet)"
-        SaaS[Dashboard y Cerebro Snyk]
+    subgraph "Snyk API & Web — Probely SaaS"
+        SaaS["api.probely.com<br/>Motor DAST + Dashboard"]
     end
 
     subgraph "Red Corporativa On-Premise"
-        Agent[Self-hosted Agent<br/>Ejecuta: Snyk CLI]
-        QA[Servidor QA<br/>IIS / App Interna]
-        
-        Agent -- "2. Ataque DAST (LAN local)" --> QA
+        Agent["Self-hosted Agent<br/>Ejecuta: Probely CLI"]
+        QA["Servidor QA<br/>IIS / App Interna"]
+
+        Agent -- "2. Escaneo DAST (LAN / accesible al target)" --> QA
     end
 
     %% Conexiones Outbound
-    Agent -- "1. Descarga Reglas (Outbound 443)" --> SaaS
-    Agent -- "3. Sube Resultados (Outbound 443)" --> SaaS
+    Agent -- "1. Inicia scan: POST /targets/ID/scan_now/ (443)" --> SaaS
+    Agent -- "3. Polling resultados + descarga JSON (443)" --> SaaS
 
     style SaaS fill:#4c4a73,color:#fff
     style Agent fill:#107c10,color:#fff

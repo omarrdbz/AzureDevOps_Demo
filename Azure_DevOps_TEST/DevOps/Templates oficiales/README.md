@@ -65,10 +65,10 @@ El flujo de seguridad está diseñado para resolver la restricción de que **For
 │  └───────────────────────────────────────────────────────────┘  │
 │                         │                                       │
 │                         ▼                                       │
-│  AGENTE SELF-HOSTED ON-PREM (acceso IIS + snyk.io:443)        │
+│  AGENTE SELF-HOSTED ON-PREM (acceso IIS + api.probely.com:443)        │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  WebDeploy → despliega a IIS                              │  │
-│  │  Snyk DAST → escaneo dinámico post-deploy                │  │
+│  │  Probely DAST → escaneo dinámico post-deploy                │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -77,7 +77,7 @@ El flujo de seguridad está diseñado para resolver la restricción de que **For
 |-------------|------|-------------|-------------------|
 | **Snyk SCA** | SCA (dependencias) | CI — MS-hosted | ✅ Sí |
 | **Fortify ScanCentral** | SAST (código) | SAST — Self-hosted | ❌ No |
-| **Snyk DAST** | DAST (dinámico) | CD — Self-hosted | ✅ Sí (snyk.io:443) |
+| **Snyk API & Web / Probely** | DAST (dinámico) | CD — Self-hosted | ✅ Sí (api.probely.com:443) |
 
 ---
 
@@ -111,7 +111,7 @@ El flujo de seguridad está diseñado para resolver la restricción de que **For
                            │
 ┌──────────────────────────▼─────────────────────────────────────────┐
 │  STAGE 3: CD_Test — Deploy + Snyk DAST                             │
-│  Pool: Self-hosted (Pool-Test, acceso IIS + snyk.io:443)           │
+│  Pool: Self-hosted (Pool-Test, acceso IIS + api.probely.com:443)       │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │  1. Download artefacto app                                    │  │
 │  │  2. Backup pre-deploy (+ rotación)                            │  │
@@ -200,10 +200,12 @@ El flujo de seguridad está diseñado para resolver la restricción de que **For
 | `healthCheckDelaySeconds` | number | `10` | Segundos entre reintentos |
 | `enableAutoRollback` | boolean | `true` | Rollback automático si falla HC |
 | `maxBackups` | number | `5` | Máximo de backups a retener |
-| `enableSnykDAST` | boolean | `false` | Habilitar Snyk DAST post-deploy |
-| `snykServiceConnection` | string | `sc-snyk` | Service Connection de Snyk |
-| `snykDastTargetUrl` | string | — | URL objetivo (default: `$(SiteUrl)`) |
-| `snykDastFailOnIssues` | boolean | `false` | Fallar si DAST encuentra issues |
+| `enableSnykApiWebDAST` | boolean | `false` | Habilitar Snyk API & Web DAST (Probely) |
+| `snykApiWebTargetId` | string | — | Target ID en Snyk API & Web |
+| `snykApiWebScanProfile` | string | `normal` | `lightning` \| `normal` \| `safe` |
+| `snykApiWebTimeoutMinutes` | number | `60` | Timeout del scan DAST |
+| `snykApiWebSeverityThreshold` | string | `HIGH` | `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL` |
+| `snykApiWebFailOnIssues` | boolean | `true` | Fallar si DAST encuentra >= umbral |
 | `environment` | string | — | Nombre del entorno (informativo) |
 
 **Variables requeridas en el Variable Group:**
@@ -211,7 +213,10 @@ El flujo de seguridad está diseñado para resolver la restricción de que **For
 - `SiteUrl` — URL completa del sitio
 - `WebDeployUser` — Cuenta de servicio
 - `WebDeployPassword` 🔒 — Secreto
-- `SnykToken` 🔒 — Token API de Snyk (si DAST habilitado)
+- `ProbelyApiKey` 🔒 — API Key JWT de Snyk API & Web / Probely (si DAST habilitado)
+
+> **NOTA:** `ProbelyApiKey` es una credencial **distinta** a la Service Connection de Snyk SCA.
+> Son productos Snyk separados con tokens propios. No reutilizar.
 
 ---
 
@@ -281,7 +286,7 @@ Pipeline (.yml del proyecto)
 | Sitio IIS creado (via bootstrap) | `guia-web-deploy-iis.md` §8 |
 | Variable Group con variables del entorno | Pipelines > Library |
 | Environment con aprobaciones (Prod) | Pipelines > Environments |
-| Salida a snyk.io:443 (si DAST habilitado) | Firewall |
+| Salida a api.probely.com:443 (si DAST habilitado) | Firewall |
 
 ---
 
@@ -328,7 +333,7 @@ Pipelines > New Pipeline > Existing YAML > seleccionar tu archivo
 | `SiteUrl` | Texto | `https://miapp-test.empresa.local` |
 | `WebDeployUser` | Texto | `svc_ado_deploy` |
 | `WebDeployPassword` | 🔒 | `****` |
-| `SnykToken` | 🔒 | `****` (token API de Snyk) |
+| `ProbelyApiKey` | 🔒 | `****` (API Key de Snyk API & Web / Probely — solo si DAST habilitado) |
 
 ### Variable Group de Fortify (compartido)
 
@@ -362,7 +367,7 @@ Se usa **Git Flow simplificado**:
 | **Mínimo privilegio** | Cuenta sin admin local; deploy via WMSVC delegado |
 | **SCA obligatorio** | Snyk Open Source en cada build (CI) |
 | **SAST obligatorio** | Fortify ScanCentral con Quality Gate (SAST stage) |
-| **DAST post-deploy** | Snyk DAST contra app desplegada (CD Test) |
+| **DAST post-deploy** | Snyk API & Web / Probely DAST contra app desplegada (CD Test) |
 | **Quality Gate** | Pipeline falla si Critical > 0 o High > 0 |
 | **Aprobaciones** | Prod requiere aprobación manual |
 | **Branch control** | Prod solo desde `main` |
@@ -374,7 +379,7 @@ Se usa **Git Flow simplificado**:
 | Dependencias | **Snyk Open Source** | SCA | CI (MS-hosted) |
 | Dependencias | NuGet Audit / npm audit | SCA nativo | CI (alternativa) |
 | Código fuente | **Fortify ScanCentral** | SAST | SAST (Self-hosted) |
-| App desplegada | **Snyk DAST** | DAST | CD (Self-hosted) |
+| App desplegada | **Snyk API & Web / Probely** | DAST | CD (Self-hosted) |
 
 ---
 
@@ -427,25 +432,35 @@ Escanea dependencias de terceros en busca de vulnerabilidades conocidas.
 2. Service Connection tipo Snyk (`sc-snyk`)
 3. Agente MS-hosted con salida a internet
 
-### Snyk DAST (Stage CD)
+### Snyk API & Web DAST — Probely (Stage CD)
 
-Escaneo dinámico contra la aplicación desplegada y corriendo.
+Escaneo dinámico real (DAST) contra la aplicación desplegada y corriendo.
+Usa el motor Probely (adquirido por Snyk) a través de su CLI/API.
+
+> **IMPORTANTE:** Esto NO es `snyk test` (que es SCA para dependencias).
+> `snyk test --target-reference=<URL>` **no es DAST** — solo agrupa resultados por rama.
 
 **Requisitos:**
-1. Snyk CLI instalado en agente on-prem (o se instala via npm)
-2. Salida a snyk.io:443 desde agente on-prem
-3. Variable `SnykToken` en el Variable Group
+1. Probely CLI instalada en agente on-prem: `pip install probely`
+2. Target ID del sitio registrado en Snyk API & Web
+3. API Key JWT de Snyk API & Web (`ProbelyApiKey`) — **distinta** al token SCA
+4. Salida a `api.probely.com:443` desde agente on-prem
+5. Variable `ProbelyApiKey` 🔒 en el Variable Group del entorno
 
 ### Uso
 
 ```yaml
-# SCA en CI:
+# SCA en CI (Snyk Open Source):
 enableSnykSCA: true
 snykServiceConnection: 'sc-snyk'
 
-# DAST en CD (solo Test, no Prod):
-enableSnykDAST: true          # Stage Test
-enableSnykDAST: false         # Stage Prod
+# DAST en CD (Snyk API & Web / Probely — solo Test, no Prod):
+enableSnykApiWebDAST: true               # Stage Test
+snykApiWebTargetId: '<TARGET_ID>'
+snykApiWebSeverityThreshold: 'HIGH'
+snykApiWebFailOnIssues: true
+
+enableSnykApiWebDAST: false              # Stage Prod
 ```
 
 ---
@@ -485,7 +500,7 @@ El sitio IIS debe existir antes del primer deploy. Ejecutar bootstrap:
 | ScanCentral submit falla | Controller inaccesible | Verificar red agente → controller |
 | Quality Gate falla | Vulnerabilidades Critical/High | Remediar en código o ajustar umbrales |
 | SSC API error | Token inválido o SSC inaccesible | Regenerar token en SSC |
-| Snyk DAST falla | Sin salida a snyk.io:443 | Habilitar en firewall |
+| Snyk DAST falla | Sin salida a api.probely.com:443 | Habilitar en firewall |
 | `Downloads not found` en CD | Nombre artefacto no coincide | Verificar `artifactName` idéntico |
 
 ---

@@ -16,7 +16,7 @@
 #
 # REQUISITOS DE RED (agente on-prem):
 #   ✅ Acceso a servidores IIS internos (Web Deploy)
-#   ✅ Acceso a snyk.io:443 (si Snyk DAST habilitado)
+#   ✅ Acceso a api.probely.com:443 (si Snyk API & Web DAST habilitado)
 #
 # VARIABLES REQUERIDAS EN VARIABLE GROUP:
 #   - WebsiteName          (nombre del sitio en IIS, ej: "MiApp-Test")
@@ -81,35 +81,59 @@ parameters:
     default: 5
     # Cantidad máxima de backups a retener (los más antiguos se eliminan)
 
-  # ─── Snyk DAST — Escaneo dinámico post-deploy ─────────────────
-  - name: enableSnykDAST
+  # ─── Snyk API & Web DAST — Escaneo dinámico post-deploy ────────
+  # Integración con Snyk API & Web (anteriormente Probely).
+  # Ejecuta un escaneo DAST real contra la URL de la aplicación desplegada.
+
+  # REQUISITOS:
+  #   1. Probely CLI pre-instalada en el agente: pip install probely
+  #   2. Target ID configurado en Snyk API & Web para la URL del sitio
+  #   3. API Key de Snyk API & Web (JWT) — distinta al token de Snyk SCA
+  #   4. Salida a api.probely.com:443 desde el agente on-prem
+  #
+  # CREDENCIALES (en Variable Group del entorno):
+  #   ProbelyApiKey      🔒 secreto — API Key JWT de Snyk API & Web / Probely
+  - name: enableSnykApiWebDAST
     type: boolean
     default: false
-    # DAST (Dynamic Application Security Testing) con Snyk.
-    # Ejecuta un escaneo de seguridad contra la aplicación desplegada.
-    # Requiere: salida a snyk.io:443 desde el agente on-prem.
 
-  - name: snykServiceConnection
-    type: string
-    default: 'sc-snyk'
-    # Service Connection de Snyk configurado en Azure DevOps
-
-  - name: snykDastTargetUrl
+  - name: snykApiWebTargetId
     type: string
     default: ''
-    # URL objetivo para el escaneo DAST. Si vacío, usa $(SiteUrl).
-    # Puede incluir rutas específicas, ej: 'https://miapp-test.empresa.local/api'
+    # Target ID registrado en Snyk API & Web para la URL del sitio.
+    # Obtener desde: Snyk API & Web → Targets → seleccionar target → copiar ID.
 
-  - name: snykDastFailOnIssues
+  - name: snykApiWebScanProfile
+    type: string
+    default: 'normal'
+    # Perfil de escaneo: 'lightning' (rápido), 'normal', 'safe' (no-intrusivo)
+    values:
+      - lightning
+      - normal
+      - safe
+
+  - name: snykApiWebTimeoutMinutes
+    type: number
+    default: 60
+    # Tiempo máximo de espera para que el scan DAST complete.
+    # Si se excede, el step falla. Recomendado: 60-120 min.
+
+  - name: snykApiWebSeverityThreshold
+    type: string
+    default: 'HIGH'
+    # Severidad mínima para fallar el pipeline.
+    # Valores: LOW | MEDIUM | HIGH | CRITICAL
+    values:
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+
+  - name: snykApiWebFailOnIssues
     type: boolean
-    default: false
-    # Si true, el pipeline falla cuando Snyk DAST encuentre vulnerabilidades.
-    # Recomendación: false inicialmente, migrar a true cuando se estabilice.
-
-  # ─── Información del entorno (se pasa desde stage-cd.yml) ────
-  - name: environment
-    type: string
-    default: ''
+    default: true
+    # Si true, el pipeline falla cuando se encuentran vulnerabilidades
+    # sobre el umbral configurado en snykApiWebSeverityThreshold.
 
 steps:
   # ===========================================================================
@@ -321,6 +345,22 @@ steps:
               & $appcmd stop site /site.name:"$websiteName" 2>$null
               Start-Sleep -Seconds 3
 
+            #   # Validar que deployPath es seguro antes de borrar
+            #   $resolvedPath = (Resolve-Path $deployPath -ErrorAction SilentlyContinue).Path
+            #   $safePrefixes = @("C:\inetpub\", "D:\inetpub\", "C:\deploy", "D:\deploy", "C:\sites\", "D:\sites\")
+            #   $isSafe = $false
+            #   foreach ($prefix in $safePrefixes) {
+            #       if ($resolvedPath -and $resolvedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            #           $isSafe = $true
+            #           break
+            #       }
+            #   }
+            #   if (-not $isSafe) {
+            #       Write-Host "##vso[task.logissue type=error]Rollback abortado: deployPath '$deployPath' no está bajo un directorio seguro conocido."
+            #       Write-Host "Directorios seguros: $($safePrefixes -join ', ')"
+            #       throw "Rollback abortado por seguridad — ruta no confiable: $deployPath"
+            #   }
+
               Remove-Item "$deployPath\*" -Recurse -Force -ErrorAction SilentlyContinue
               Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
 
@@ -335,74 +375,121 @@ steps:
     displayName: '🏥 Health Check + Auto-Rollback'
 
   # ===========================================================================
-  # PASO 7: DAST — Snyk (Escaneo dinámico post-deploy)
+  # PASO 7: DAST — Snyk API & Web (Probely)
   # ===========================================================================
-  # Ejecuta Snyk DAST contra la aplicación ya desplegada y corriendo.
-  # Se ejecuta DESPUÉS del health check porque necesita una app funcional.
+  # Ejecuta un escaneo DAST real contra la aplicación desplegada usando
+  # Snyk API & Web (motor Probely).
+  # Integración basada en la documentación oficial:
+  #   - API: POST https://api.probely.com/targets/<TARGET_ID>/scan_now/
+  #   - CLI: probely targets follow-scan <TARGET_ID> (modo bloqueante)
   #
-  # REQUISITOS para habilitar Snyk DAST:
-  #   1. Extensión "Snyk Security Scan" instalada desde el Marketplace
-  #   2. Service Connection tipo Snyk configurado (default: 'sc-snyk')
-  #   3. El agente on-prem debe tener salida a snyk.io:443
-  #   4. Snyk CLI instalado en el agente (o se instala automáticamente)
-  #   5. Pasar enableSnykDAST: true en los parámetros del stage CD
+  # Modo enterprise recomendado:
+  #   Dispara el scan, espera resultados (blocking), y falla según severidad.
+  #   Usa `probely targets follow-scan` con --timeout y --severity-threshold.
   #
-  # NOTA: Si Snyk CLI no está disponible, se puede instalar vía npm:
-  #   npm install -g snyk
-  - ${{ if eq(parameters.enableSnykDAST, true) }}:
+  # REQUISITOS:
+  #   1. Probely CLI pre-instalada en el agente (pip install probely)
+  #      O se instala en runtime si no existe
+  #   2. Target ID del sitio registrado en Snyk API & Web
+  #   3. API Key JWT de Snyk API & Web
+  #   4. Salida a api.probely.com:443 desde el agente on-prem
+  - ${{ if eq(parameters.enableSnykApiWebDAST, true) }}:
     - powershell: |
-        $targetUrl = "${{ coalesce(parameters.snykDastTargetUrl, '$(SiteUrl)') }}"
-        $failOnIssues = [System.Convert]::ToBoolean("${{ parameters.snykDastFailOnIssues }}")
+        $targetId          = "${{ parameters.snykApiWebTargetId }}"
+        $scanProfile       = "${{ parameters.snykApiWebScanProfile }}"
+        $timeoutMinutes    = ${{ parameters.snykApiWebTimeoutMinutes }}
+        $severityThreshold = "${{ parameters.snykApiWebSeverityThreshold }}"
+        $failOnIssues      = [System.Convert]::ToBoolean("${{ parameters.snykApiWebFailOnIssues }}")
 
         Write-Host "═══════════════════════════════════════════════"
-        Write-Host "  SNYK DAST — Dynamic Security Scan"
+        Write-Host "  DAST — Snyk API & Web (Probely)"
         Write-Host "═══════════════════════════════════════════════"
-        Write-Host "  Target URL:      $targetUrl"
-        Write-Host "  Fail on Issues:  $failOnIssues"
+        Write-Host "  Target ID:           $targetId"
+        Write-Host "  Scan Profile:        $scanProfile"
+        Write-Host "  Timeout:             $timeoutMinutes min"
+        Write-Host "  Severity Threshold:  $severityThreshold"
+        Write-Host "  Fail on Issues:      $failOnIssues"
         Write-Host "═══════════════════════════════════════════════"
 
-        # Verificar que Snyk CLI esté disponible
-        $snykExists = Get-Command snyk -ErrorAction SilentlyContinue
-        if (-not $snykExists) {
-            Write-Host "Snyk CLI no encontrado. Instalando via npm..."
-            npm install -g snyk
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "##vso[task.logissue type=warning]No se pudo instalar Snyk CLI. DAST omitido."
-                Write-Host "Para instalar manualmente: npm install -g snyk"
-                exit 0
-            }
+        # ── Validar parámetros obligatorios ──
+        if ([string]::IsNullOrWhiteSpace($targetId)) {
+            Write-Host "##vso[task.logissue type=error]snykApiWebTargetId es requerido para DAST."
+            Write-Host "Obtener el Target ID desde: Snyk API & Web > Targets > seleccionar target > copiar ID."
+            exit 1
         }
 
-        # Autenticar con Snyk usando el token del Service Connection
-        # El token se pasa como variable de entorno
-        snyk auth $env:SNYK_TOKEN
+        if ([string]::IsNullOrWhiteSpace($env:PROBELY_API_KEY)) {
+            Write-Host "##vso[task.logissue type=error]Variable ProbelyApiKey no está configurada."
+            Write-Host "Agregar ProbelyApiKey como variable secreta en el Variable Group del entorno."
+            exit 1
+        }
 
-        Write-Host "`nIniciando escaneo DAST contra: $targetUrl"
+        # ── Verificar/instalar Probely CLI ──
+        # RECOMENDACIÓN: Pre-instalar Probely CLI en el agente (pip install probely)
+        # para mayor reproducibilidad. El fallback de instalación en runtime se
+        # mantiene para primer uso, pero NO es la práctica recomendada en producción.
+        $probelyCmd = Get-Command probely -ErrorAction SilentlyContinue
+        if (-not $probelyCmd) {
+            Write-Host "##vso[task.logissue type=warning]Probely CLI no pre-instalada en el agente. Instalando en runtime (no recomendado para producción)."
+            python -m pip install --upgrade probely 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "##vso[task.logissue type=error]No se pudo instalar Probely CLI."
+                Write-Host "Instalar manualmente en el agente: pip install probely"
+                exit 1
+            }
+            Write-Host "✅ Probely CLI instalada (considerar pre-instalar en el agente)"
+        } else {
+            Write-Host "Probely CLI: $($probelyCmd.Source)"
+        }
 
-        # Ejecutar Snyk DAST contra la URL del sitio desplegado
-        # Nota: el comando específico puede variar según la versión de Snyk DAST.
-        # Ajustar según la documentación de Snyk para tu licencia.
-        snyk test --target-reference=$targetUrl 2>&1 | Tee-Object -Variable snykOutput
+        # ── Ejecutar DAST en modo bloqueante (enterprise) ──
+        # `probely targets follow-scan` dispara el scan y espera resultados.
+        # --severity-threshold: falla si hay vulnerabilidades >= umbral
+        # --timeout: tiempo máximo de espera en minutos
+        # --continue-scan: si se interrumpe el pipeline, el scan sigue en Probely
+        # -o JSON: output en JSON para parseo posterior si necesario
+        Write-Host "`nIniciando DAST scan en modo bloqueante..."
 
-        $snykExitCode = $LASTEXITCODE
+        # ── Generar config YAML con scan_profile ──
+        # La CLI soporta --yaml-file / -f para pasar configuración de scan.
+        # Esto hace efectivo el parámetro snykApiWebScanProfile.
+        $scanConfigPath = Join-Path "$(Agent.TempDirectory)" "snyk-api-web-scan.yml"
+        @"
+scan_profile: $scanProfile
+"@ | Set-Content -Path $scanConfigPath -Encoding UTF8
+        Write-Host "  Config file:         $scanConfigPath"
+
+        $probelyArgs = @(
+            "targets", "follow-scan", $targetId,
+            "--timeout", $timeoutMinutes.ToString(),
+            "--severity-threshold", $severityThreshold,
+            "--continue-scan",
+            "-f", $scanConfigPath,
+            "-o", "JSON"
+        )
+
+        # PROBELY_API_KEY se inyecta como env var (estándar de la CLI).
+        # No se pasa --api-key en la línea de comandos por seguridad.
+        probely @probelyArgs 2>&1 | Tee-Object -Variable probelyOutput
+        $exitCode = $LASTEXITCODE
 
         Write-Host "`n═══════════════════════════════════════════════"
 
-        if ($snykExitCode -ne 0) {
-            Write-Host "##vso[task.logissue type=warning]Snyk DAST encontró hallazgos de seguridad."
+        if ($exitCode -ne 0) {
             if ($failOnIssues) {
-                Write-Host "##vso[task.logissue type=error]DAST encontró vulnerabilidades — pipeline fallará."
+                Write-Host "##vso[task.logissue type=error]❌ DAST encontró vulnerabilidades >= $severityThreshold."
+                Write-Host "##vso[task.logissue type=error]Revisar resultados en Snyk API & Web > Target: $targetId"
                 exit 1
             } else {
-                Write-Host "⚠️ Hallazgos reportados (failOnIssues=false — pipeline continúa)"
+                Write-Host "##vso[task.logissue type=warning]DAST reportó hallazgos (snykApiWebFailOnIssues=false — pipeline continúa)."
             }
         } else {
-            Write-Host "✅ Snyk DAST completado — no se encontraron vulnerabilidades"
+            Write-Host "✅ DAST completado — sin vulnerabilidades >= $severityThreshold"
         }
-      displayName: '🔍 DAST — Snyk Security Scan'
-      continueOnError: true
+      displayName: '🔍 DAST — Snyk API & Web (Probely)'
+      timeoutInMinutes: ${{ add(parameters.snykApiWebTimeoutMinutes, 5) }}
       env:
-        SNYK_TOKEN: $(SnykToken)
+        PROBELY_API_KEY: $(ProbelyApiKey)
 
   # ===========================================================================
   # PASO 8: Resumen del Deploy
@@ -420,7 +507,7 @@ steps:
       Write-Host "  Build Number:  $(Build.BuildNumber)"
       Write-Host "  Branch:        $(Build.SourceBranchName)"
       Write-Host "  Deployed By:   $(Build.RequestedFor)"
-      Write-Host "  Snyk DAST:     ${{ parameters.enableSnykDAST }}"
+      Write-Host "  Snyk DAST:     ${{ parameters.enableSnykApiWebDAST }}"
       Write-Host "  Timestamp:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
       Write-Host "═══════════════════════════════════════════════"
     displayName: '📋 Deploy Summary'

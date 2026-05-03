@@ -38,6 +38,14 @@ parameters:
     type: string
     # Nombre del Agent Pool on-prem (ej: 'Pool-Test', 'Pool-Prod')
 
+  # ─── Variable Group con tokens Fortify ────────────────────────
+  - name: variableGroup
+    type: string
+    default: 'vg-fortify'
+    # Variable Group que contiene FortifyScanCentralToken y FortifySSCToken.
+    # Si se pasan los tokens directamente como parámetros, este grupo
+    # sigue siendo necesario para que las variables sean accesibles.
+
   # ─── Control de flujo entre stages ────────────────────────────
   - name: dependsOn
     type: string
@@ -115,6 +123,11 @@ stages:
 
     pool:
       name: ${{ parameters.pool }}
+
+    # ─── Variables del Variable Group Fortify (tokens) ──────────
+    variables:
+      - group: ${{ parameters.variableGroup }}
+
 
     jobs:
       - job: FortifySAST

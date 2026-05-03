@@ -11,12 +11,13 @@ sequenceDiagram
     participant PIPE as ⚙️ Azure Pipelines
     participant MS as 🖥️ MS-Hosted Agent
     participant ART as 📦 Azure Artifacts
-    participant SNYK as 🌐 Snyk SaaS
+    participant SNYK as 🌐 Snyk SaaS<br/>(SCA)
     participant SH_SAST as 🛡️ Self-Hosted Agent<br/>(SAST)
     participant SC as 🎛️ ScanCentral<br/>Controller
     participant SSC as 📊 Fortify SSC
     participant SH_TEST as 🚀 Self-Hosted Agent<br/>(Pool-Test)
     participant IIS_QA as 🌐 IIS QA/Test
+    participant PROBELY as 🔍 Snyk API & Web<br/>(Probely DAST)
     participant APPROVER as ✅ Approver
     participant SH_PROD as 🚀 Self-Hosted Agent<br/>(Pool-Prod)
     participant IIS_PROD as 🌐 IIS Producción
@@ -99,7 +100,7 @@ sequenceDiagram
     %% STAGE 3: CD Test — Deploy + Snyk DAST
     %% ─────────────────────────────────────────────────────────────
     rect rgb(232, 255, 232)
-    note over SH_TEST,SNYK: 🟢 STAGE 3: CD Test — Deploy + Snyk DAST<br/>(Self-Hosted Agent Pool-Test — acceso IIS + snyk.io:443)
+    note over SH_TEST,PROBELY: 🟢 STAGE 3: CD Test — Deploy + Snyk API & Web DAST<br/>(Self-Hosted Agent Pool-Test — acceso IIS + api.probely.com:443)
 
     PIPE->>SH_TEST: Asignar agente Pool-Test
 
@@ -125,11 +126,12 @@ sequenceDiagram
         SH_TEST->>SH_TEST: 🔄 Auto-Rollback (restaurar backup)
         SH_TEST->>PIPE: ❌ Deploy falló — rollback ejecutado
     else Health Check OK
-        note over SH_TEST: 🔍 Snyk DAST (post-deploy)
-        SH_TEST->>SNYK: snyk test --target-reference={SiteUrl}
-        SNYK->>IIS_QA: Escaneo dinámico contra app desplegada
-        IIS_QA-->>SNYK: Respuestas HTTP
-        SNYK-->>SH_TEST: Reporte DAST (vulnerabilidades dinámicas)
+        note over SH_TEST: 🔍 DAST — Snyk API & Web (Probely)
+        SH_TEST->>SH_TEST: probely targets follow-scan <TARGET_ID>
+        SH_TEST->>PROBELY: API: POST /targets/<ID>/scan_now/
+        PROBELY->>IIS_QA: Escaneo dinámico (fuzzing, inyección, headers)
+        IIS_QA-->>PROBELY: Respuestas HTTP
+        PROBELY-->>SH_TEST: Resultados DAST (JSON, severity threshold)
         note over SH_TEST: ✅ Stage CD_Test completado
     end
     end
