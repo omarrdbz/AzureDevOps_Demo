@@ -1,167 +1,69 @@
 sequenceDiagram
     autonumber
 
-    %% ═══════════════════════════════════════════════════════════════
-    %% DIAGRAMA DE SECUENCIA — Pipeline Híbrido Seguro
-    %% CI → SAST → CD_Test → CD_Prod
-    %% ═══════════════════════════════════════════════════════════════
+    participant Dev as Developer
+    participant Repo as Azure Repos
+    participant Pipe as Azure Pipelines
+    participant CI as Microsoft-hosted CI
+    participant Art as Azure Artifacts
+    participant Snyk as Snyk Open Source
+    participant SAST as Self-hosted SAST
+    participant SC as ScanCentral Controller
+    participant SSC as Fortify SSC
+    participant CDTest as Self-hosted CD Test
+    participant IISTest as IIS Test
+    participant DAST as Snyk API & Web
+    participant Approver as Environment Approval
+    participant CDProd as Self-hosted CD Prod
+    participant IISProd as IIS Prod
 
-    participant DEV as 👨‍💻 Developer
-    participant REPOS as 📂 Azure Repos
-    participant PIPE as ⚙️ Azure Pipelines
-    participant MS as 🖥️ MS-Hosted Agent
-    participant ART as 📦 Azure Artifacts
-    participant SNYK as 🌐 Snyk SaaS<br/>(SCA)
-    participant SH_SAST as 🛡️ Self-Hosted Agent<br/>(SAST)
-    participant SC as 🎛️ ScanCentral<br/>Controller
-    participant SSC as 📊 Fortify SSC
-    participant SH_TEST as 🚀 Self-Hosted Agent<br/>(Pool-Test)
-    participant IIS_QA as 🌐 IIS QA/Test
-    participant PROBELY as 🔍 Snyk API & Web<br/>(Probely DAST)
-    participant APPROVER as ✅ Approver
-    participant SH_PROD as 🚀 Self-Hosted Agent<br/>(Pool-Prod)
-    participant IIS_PROD as 🌐 IIS Producción
+    Dev->>Repo: Push a main
+    Repo->>Pipe: Dispara pipeline
 
-    %% ─────────────────────────────────────────────────────────────
-    %% STAGE 1: CI — Build, Test, SCA & Fortify Package
-    %% ─────────────────────────────────────────────────────────────
-    rect rgb(224, 240, 255)
-    note over MS,SNYK: 🔵 STAGE 1: CI — Build, Test, SCA & Fortify Package<br/>(Microsoft-Hosted Agent — CON internet)
+    Pipe->>CI: Stage CI
+    CI->>Repo: Checkout
+    CI->>CI: Setup SDK/runtime
+    CI->>CI: Restore, build y test
+    CI->>Snyk: SCA de dependencias
+    Snyk-->>CI: Resultado SCA
+    CI->>CI: NuGet audit / npm audit
+    CI->>CI: ScanCentral package
+    CI->>CI: Publish aplicación
+    CI->>Art: Publica app-{build}-{branch}
+    CI->>Art: Publica FortifyPackage-{build}
 
-    DEV->>REPOS: git push main
-    REPOS->>PIPE: Trigger (CI pipeline)
-    PIPE->>MS: Asignar agente MS-hosted
+    Pipe->>SAST: Stage SAST
+    SAST->>Art: Descarga FortifyPackage-{build}
+    SAST->>SC: Envia scancentral-pkg.zip (-upload -block)
+    SC->>SSC: Publica resultados SAST
+    SC-->>SAST: Scan completado
+    SAST->>SSC: Consulta conteo por severidad
+    SSC-->>SAST: Critical, High, Medium, Low
 
-    MS->>REPOS: git checkout (descarga código)
+    alt Critical/High excede umbral
+        SAST-->>Pipe: Falla quality gate
+    else Quality gate aprobado
+        Pipe->>CDTest: Stage CD Test
+        CDTest->>Art: Descarga app-{build}-{branch}
+        CDTest->>CDTest: Backup y rotación
+        CDTest->>IISTest: Valida sitio IIS
+        CDTest->>IISTest: Deploy con Web Deploy
+        CDTest->>IISTest: Health check
 
-    note over MS: 🔧 Setup: Instalar SDK
+        alt Health check falla
+            CDTest->>CDTest: Rollback desde backup
+            CDTest-->>Pipe: Falla deploy
+        else Health check OK
+            CDTest->>DAST: Ejecuta scan DAST
+            DAST->>IISTest: Pruebas dinámicas
+            DAST-->>CDTest: Resultado por severidad
+        end
 
-    MS->>MS: dotnet restore + dotnet build
-    MS->>MS: dotnet test (tests unitarios)
-
-    note over MS: 🛡️ Seguridad SCA
-
-    MS->>SNYK: SnykSecurityScan (testType: app)
-    SNYK-->>MS: Reporte SCA (dependencias)
-
-    MS->>MS: dotnet list package --vulnerable
-    note right of MS: Alternativa nativa<br/>(complemento a Snyk)
-
-    note over MS: 📦 Fortify ScanCentral Package
-
-    MS->>MS: scancentral package -bt msbuild -o scancentral-pkg.zip
-    note right of MS: Empaquetado offline<br/>(NO requiere Fortify on-prem)
-
-    MS->>MS: dotnet publish (genera binarios app)
-
-    MS->>ART: Publish Artefacto 1: App-{build}-{branch}
-    MS->>ART: Publish Artefacto 2: FortifyPackage-{build}
-
-    note over MS: ✅ Stage CI completado — 2 artefactos publicados
-    end
-
-    %% ─────────────────────────────────────────────────────────────
-    %% STAGE 2: SAST — Fortify ScanCentral Upload & Quality Gate
-    %% ─────────────────────────────────────────────────────────────
-    rect rgb(255, 232, 232)
-    note over SH_SAST,SSC: 🔴 STAGE 2: SAST — Fortify ScanCentral Upload & Quality Gate<br/>(Self-Hosted Agent — SIN internet, CON acceso Fortify)
-
-    PIPE->>SH_SAST: Asignar agente on-prem
-
-    SH_SAST->>ART: Download: FortifyPackage-{build}
-    note right of SH_SAST: Solo descarga el ZIP de Fortify<br/>(NO la app compilada)
-
-    SH_SAST->>SC: scancentral start -upload -block -package scancentral-pkg.zip
-    note right of SC: El controller distribuye<br/>el scan a un sensor/worker
-
-    SC-->>SC: Escaneo SAST en ejecución...
-    SC-->>SSC: Sube resultados (.fpr) a SSC
-
-    SC-->>SH_SAST: Scan completado (block mode)
-
-    note over SH_SAST: 🚦 Quality Gate (SSC API)
-
-    SH_SAST->>SSC: GET /api/v1/projectVersions?q=project.name:{app}
-    SSC-->>SH_SAST: Version ID
-
-    SH_SAST->>SSC: GET /api/v1/projectVersions/{id}/issueGroups
-    SSC-->>SH_SAST: Critical: N, High: N, Medium: N, Low: N
-
-    alt Critical > 0 OR High > 0
-        SH_SAST->>PIPE: ❌ QUALITY GATE FAILED — Pipeline se detiene
-        note over SH_SAST: El pipeline NO continúa a CD.<br/>Se deben remediar las vulnerabilidades.
-    else Critical = 0 AND High = 0
-        SH_SAST->>PIPE: ✅ QUALITY GATE PASSED
-        note over SH_SAST: ✅ Stage SAST completado — continúa a CD
-    end
-    end
-
-    %% ─────────────────────────────────────────────────────────────
-    %% STAGE 3: CD Test — Deploy + Snyk DAST
-    %% ─────────────────────────────────────────────────────────────
-    rect rgb(232, 255, 232)
-    note over SH_TEST,PROBELY: 🟢 STAGE 3: CD Test — Deploy + Snyk API & Web DAST<br/>(Self-Hosted Agent Pool-Test — acceso IIS + api.probely.com:443)
-
-    PIPE->>SH_TEST: Asignar agente Pool-Test
-
-    SH_TEST->>ART: Download: App-{build}-{branch}
-    note right of SH_TEST: Descarga el artefacto de la app<br/>(NO el paquete Fortify)
-
-    SH_TEST->>SH_TEST: 💾 Backup pre-deploy (copia timestamped)
-    SH_TEST->>SH_TEST: 🧹 Limpiar backups antiguos (retención rotativa)
-
-    SH_TEST->>IIS_QA: 🔍 Verificar sitio IIS existe (appcmd list site)
-
-    SH_TEST->>IIS_QA: 🚀 msdeploy.exe -verb:sync (WebDeploy WMSVC 8172)
-    IIS_QA-->>SH_TEST: Deploy completado
-
-    note over SH_TEST: 🏥 Health Check
-
-    loop Hasta 3 reintentos
-        SH_TEST->>IIS_QA: GET {SiteUrl}/health
-        IIS_QA-->>SH_TEST: HTTP 200 OK
-    end
-
-    alt Health Check falla
-        SH_TEST->>SH_TEST: 🔄 Auto-Rollback (restaurar backup)
-        SH_TEST->>PIPE: ❌ Deploy falló — rollback ejecutado
-    else Health Check OK
-        note over SH_TEST: 🔍 DAST — Snyk API & Web (Probely)
-        SH_TEST->>SH_TEST: probely targets follow-scan <TARGET_ID>
-        SH_TEST->>PROBELY: API: POST /targets/<ID>/scan_now/
-        PROBELY->>IIS_QA: Escaneo dinámico (fuzzing, inyección, headers)
-        IIS_QA-->>PROBELY: Respuestas HTTP
-        PROBELY-->>SH_TEST: Resultados DAST (JSON, severity threshold)
-        note over SH_TEST: ✅ Stage CD_Test completado
-    end
-    end
-
-    %% ─────────────────────────────────────────────────────────────
-    %% STAGE 4: CD Prod — Deploy con Aprobación
-    %% ─────────────────────────────────────────────────────────────
-    rect rgb(255, 243, 224)
-    note over APPROVER,IIS_PROD: 🟠 STAGE 4: CD Prod — Deploy con Aprobación<br/>(Self-Hosted Agent Pool-Prod — solo desde rama main)
-
-    PIPE->>APPROVER: ⚠️ Solicitud de aprobación (Environment Prod)
-    APPROVER-->>PIPE: ✅ Aprobado
-
-    PIPE->>SH_PROD: Asignar agente Pool-Prod
-
-    SH_PROD->>ART: Download: App-{build}-{branch}
-
-    SH_PROD->>SH_PROD: 💾 Backup pre-deploy
-    SH_PROD->>SH_PROD: 🧹 Limpiar backups antiguos
-
-    SH_PROD->>IIS_PROD: 🔍 Verificar sitio IIS existe
-    SH_PROD->>IIS_PROD: 🚀 msdeploy.exe -verb:sync (WebDeploy)
-    IIS_PROD-->>SH_PROD: Deploy completado
-
-    loop Hasta 3 reintentos
-        SH_PROD->>IIS_PROD: GET {SiteUrl}/health
-        IIS_PROD-->>SH_PROD: HTTP 200 OK
-    end
-
-    note over SH_PROD: Sin DAST en Prod<br/>(ya se escaneó en Test)
-
-    note over SH_PROD: ✅ Stage CD_Prod completado — Deploy a Producción exitoso
+        Pipe->>Approver: Solicita aprobación Prod
+        Approver-->>Pipe: Aprobado
+        Pipe->>CDProd: Stage CD Prod
+        CDProd->>Art: Descarga app-{build}-{branch}
+        CDProd->>CDProd: Backup y rotación
+        CDProd->>IISProd: Deploy con Web Deploy
+        CDProd->>IISProd: Health check
     end

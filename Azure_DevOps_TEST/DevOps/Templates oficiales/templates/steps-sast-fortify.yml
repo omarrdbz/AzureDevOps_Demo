@@ -99,23 +99,14 @@ parameters:
     default: 0
     # Máximo de vulnerabilidades High permitidas (0 = cero tolerancia)
 
-  # ─── Polling ──────────────────────────────────────────────────
   - name: scanTimeoutMinutes
     type: number
     default: 60
-    # Tiempo máximo de espera para que el scan complete (minutos)
-
-  - name: pollIntervalSeconds
-    type: number
-    default: 30
-    # Intervalo entre consultas al controlador (segundos)
 
 steps:
   # ===========================================================================
   # PASO 1: Descargar ÚNICAMENTE el artefacto scancentral-pkg.zip
   # ===========================================================================
-  # Solo se descarga el paquete de Fortify, NO el artefacto de la aplicación.
-  # El artefacto de la app se descarga en el stage CD posterior.
   - download: current
     artifact: 'FortifyPackage-$(Build.BuildNumber)'
     displayName: '📥 Descargar Paquete ScanCentral'
@@ -123,11 +114,6 @@ steps:
   # ===========================================================================
   # PASO 2: Enviar paquete al controlador ScanCentral
   # ===========================================================================
-  # Usa el cliente ScanCentral (instalado vía extensión Fortify del Marketplace)
-  # para enviar el paquete pre-empaquetado al controlador on-prem.
-  #
-  # El controlador distribuye el scan a un sensor disponible.
-  # Los resultados se suben automáticamente a Fortify SSC.
   - powershell: |
       $scUrl      = "${{ parameters.fortifyScanCentralUrl }}"
       $appName    = "${{ parameters.fortifyAppName }}"
@@ -152,11 +138,6 @@ steps:
           exit 1
       }
 
-      # Enviar paquete al controlador ScanCentral
-      # -upload: subir resultados a SSC al completar
-      # -uptoken: token de autenticación para SSC
-      # -block: esperar a que el scan complete
-      # -bt: no se especifica porque el paquete ya fue creado con el build tool
       scancentral -url $scUrl start `
           -upload `
           -uptoken $env:SC_UPLOAD_TOKEN `
@@ -183,13 +164,6 @@ steps:
   # ===========================================================================
   # PASO 3: Quality Gate — Evaluar resultados en Fortify SSC
   # ===========================================================================
-  # Consulta la API REST de Fortify SSC para obtener el conteo de
-  # vulnerabilidades por severidad y falla el pipeline si excede los umbrales.
-  #
-  # Criterios por defecto (recomendados para entorno empresarial):
-  #   - Critical: 0 tolerancia → pipeline falla
-  #   - High:     0 tolerancia → pipeline falla
-  #   - Medium/Low: solo warning, pipeline continúa
   - ${{ if eq(parameters.qualityGateEnabled, true) }}:
     - powershell: |
         $sscUrl      = "${{ parameters.fortifySSCUrl }}"
@@ -208,7 +182,6 @@ steps:
         Write-Host "  Max High:      $maxHigh"
         Write-Host "═══════════════════════════════════════════════"
 
-        # Esperar breve para que SSC procese los resultados subidos
         Start-Sleep -Seconds 15
 
         $headers = @{
@@ -216,7 +189,6 @@ steps:
             "Accept"        = "application/json"
         }
 
-        # ── Paso 3a: Obtener el ID de la versión de la aplicación ──
         try {
             $versionsUrl = "$sscUrl/api/v1/projectVersions?q=project.name:$appName+and+name:$appVersion"
             $response = Invoke-RestMethod -Uri $versionsUrl -Headers $headers -Method Get
@@ -237,7 +209,6 @@ steps:
             exit 1
         }
 
-        # ── Paso 3b: Obtener resumen de issues por severidad ──
         try {
             $issuesUrl = "$sscUrl/api/v1/projectVersions/$versionId/issueGroups?groupingtype=FOLDER&filterset=a243b195-0a59-3f8b-1403-d55b7a7d78e6"
             $issuesResponse = Invoke-RestMethod -Uri $issuesUrl -Headers $headers -Method Get
@@ -271,7 +242,6 @@ steps:
         Write-Host "  │ Low         │ $($low.ToString().PadLeft(8)) │      n/a │"
         Write-Host "  └─────────────┴──────────┴──────────┘"
 
-        # ── Paso 3c: Evaluar Quality Gate ──
         $failed = $false
         $reasons = @()
 

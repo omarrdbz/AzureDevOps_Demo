@@ -1,152 +1,78 @@
-# =============================================================================
-# PIPELINE EJEMPLO: Aplicación Web Node.js (CI + SAST + CD)
-# =============================================================================
-# Tecnología:  Node.js (React, Angular, Vue, Next.js, Express, etc.)
-# Flujo:       CI (Build+SCA+Package) → SAST (Fortify) → CD Test → CD Prod
-# Agentes:     CI en Microsoft-hosted, SAST y CD en Self-hosted
-#
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  FLUJO HÍBRIDO DE SEGURIDAD:                                           ║
-# ║                                                                         ║
-# ║  Stage 1 (CI)   — MS-hosted (CON internet):                            ║
-# ║    → Build + Test + Snyk SCA + Fortify ScanCentral Package             ║
-# ║                                                                         ║
-# ║  Stage 2 (SAST) — Self-hosted (SIN internet, red Fortify):             ║
-# ║    → Upload scancentral-pkg.zip a Fortify Controller on-prem           ║
-# ║    → Quality Gate contra Fortify SSC                                    ║
-# ║                                                                         ║
-# ║  Stage 3 (CD)   — Self-hosted (acceso IIS + api.probely.com:443):      ║
-# ║    → Deploy a Test via WebDeploy + Snyk DAST                           ║
-# ║                                                                         ║
-# ║  Stage 4 (CD)   — Self-hosted (acceso IIS):                            ║
-# ║    → Deploy a Prod via WebDeploy (requiere aprobación)                 ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-#
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  INSTRUCCIONES PARA ADAPTAR A TU PROYECTO:                              ║
-# ║                                                                          ║
-# ║  1. Copiar este archivo a tu carpeta pipelines/                          ║
-# ║  2. Reemplazar todos los valores marcados con <!-- CAMBIAR -->           ║
-# ║  3. Crear los Variable Groups en Azure DevOps Library                    ║
-# ║  4. Crear los Environments en Azure DevOps con las aprobaciones          ║
-# ║  5. Ajustar las rutas de templates según tu estructura de repo           ║
-# ║  6. Verificar que package.json tenga scripts "build" y "test"            ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-#
-# NOTA SOBRE NODE.JS + IIS:
-#   Para alojar apps Node.js en IIS se requiere iisnode o usar IIS como
-#   reverse proxy hacia un proceso Node.js gestionado por PM2 o similar.
-#   El deploy via Web Deploy funciona igual: sincroniza archivos al sitio IIS.
-#   La diferencia está en la configuración del sitio (web.config con handlers).
-#
-# VARIABLE GROUPS REQUERIDOS: (misma estructura que .NET)
-#   vg-miapp-test / vg-miapp-prod
-#     - WebsiteName, SiteUrl, WebDeployUser, WebDeployPassword 🔒
-#     - ProbelyApiKey 🔒 (API Key de Snyk API & Web / Probely para DAST)
-#     - (Tus variables: NODE_ENV, API_URL, etc.)
-#
-#   vg-fortify
-#     - FortifyScanCentralToken 🔒
-#     - FortifySSCToken 🔒
-#
-# EXTENSIONES REQUERIDAS:
-#   - Snyk Security Scan: https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
-#   - Fortify:            https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
-# =============================================================================
+# Pipeline ejemplo: aplicación web Node.js
 
 name: '$(Date:yyyyMMdd).$(Rev:r)'
 
 trigger:
   branches:
     include:
-      - main                              # <!-- CAMBIAR -->
+      - main
   paths:
     include:
-      - src/**                             # <!-- CAMBIAR a la ruta de tu código fuente -->
+      - src/**
     exclude:
       - '**/*.md'
       - '**/.gitignore'
 
 pr: none
 
-# =============================================================================
-# STAGES
-# =============================================================================
 stages:
-  # ────────────────────────────────────────────────────────────────
-  # STAGE 1: CI — Build, Test, Snyk SCA, Fortify Package
-  # Agente: Microsoft-hosted (ubuntu-latest para Node.js)
-  # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-ci.yml
     parameters:
       technology: 'nodejs'
-      vmImage: 'ubuntu-latest'             # ubuntu es más rápido para Node.js
-      nodeVersion: '20.x'                  # <!-- CAMBIAR a tu versión de Node.js -->
-      packageManager: 'npm'                # <!-- CAMBIAR a 'yarn' si usas Yarn -->
-      buildScript: 'build'                 # <!-- CAMBIAR si tu script de build tiene otro nombre -->
-      testScript: 'test'                   # <!-- CAMBIAR -->
-      outputFolder: 'dist'                 # <!-- CAMBIAR a la carpeta de salida de tu build -->
-      artifactName: 'MiAppNode'            # <!-- CAMBIAR -->
-      # ── Snyk SCA ──
+      vmImage: 'ubuntu-latest'
+      nodeVersion: '20.x'
+      packageManager: 'npm'
+      buildScript: 'build'
+      testScript: 'test'
+      outputFolder: 'dist'
+      artifactName: 'MiAppNode'
       enableSnykSCA: true
-      snykServiceConnection: 'sc-snyk'     # <!-- CAMBIAR -->
+      snykServiceConnection: 'sc-snyk'
       snykFailOnIssues: true
-      enableNativeDependencyScan: true     # npm audit como alternativa
-      # ── Fortify ScanCentral Package ──
+      enableNativeDependencyScan: true
       enableFortifyPackage: true
-      fortifyBuildId: 'MiAppNode'          # <!-- CAMBIAR -->
+      fortifyBuildId: 'MiAppNode'
 
-  # ────────────────────────────────────────────────────────────────
-  # STAGE 2: SAST — Fortify ScanCentral Upload & Quality Gate
-  # Agente: Self-hosted (On-Prem) — SIN internet
-  # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-sast.yml
     parameters:
-      pool: 'Pool-Test'                    # <!-- CAMBIAR -->
-      variableGroup: 'vg-fortify'           # <!-- CAMBIAR — Variable Group con tokens Fortify -->
+      pool: 'Pool-Test'
+      variableGroup: 'vg-fortify'
       dependsOn: 'CI'
-      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
-      fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'  # <!-- CAMBIAR -->
+      artifactName: 'MiAppNode'
+      fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'
       fortifyScanCentralToken: $(FortifyScanCentralToken)
-      fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'   # <!-- CAMBIAR -->
+      fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'
       fortifySSCAuthToken: $(FortifySSCToken)
-      fortifyAppName: 'MiAppNode'          # <!-- CAMBIAR -->
-      fortifyAppVersion: '1.0'             # <!-- CAMBIAR -->
+      fortifyAppName: 'MiAppNode'
+      fortifyAppVersion: '1.0'
       qualityGateEnabled: true
       qualityGateMaxCritical: 0
       qualityGateMaxHigh: 0
 
-  # ────────────────────────────────────────────────────────────────
-  # STAGE 3: CD — Deploy a Test + Snyk DAST
-  # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
       environment: 'Test'
-      pool: 'Pool-Test'                    # <!-- CAMBIAR -->
-      variableGroup: 'vg-miapp-test'       # <!-- CAMBIAR -->
-      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
-      deployPath: 'C:\inetpub\wwwroot\MiAppNode'      # <!-- CAMBIAR -->
-      backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
-      healthCheckEndpoint: '/'             # <!-- CAMBIAR — '/' si no hay /health -->
+      pool: 'Pool-Test'
+      variableGroup: 'vg-miapp-test'
+      artifactName: 'MiAppNode'
+      deployPath: 'C:\inetpub\wwwroot\MiAppNode'
+      backupPath: 'C:\deploy-backups\MiAppNode'
+      healthCheckEndpoint: '/'
       dependsOn: 'SAST'
-      # ── Snyk API & Web DAST (Probely) ─ solo en Test ──
       enableSnykApiWebDAST: true
-      snykApiWebTargetId: '<TARGET_ID>'    # <!-- CAMBIAR -->
+      snykApiWebTargetId: '<TARGET_ID>'
       snykApiWebScanProfile: 'normal'
       snykApiWebSeverityThreshold: 'HIGH'
       snykApiWebFailOnIssues: true
 
-  # ────────────────────────────────────────────────────────────────
-  # STAGE 4: CD — Deploy a Producción
-  # ────────────────────────────────────────────────────────────────
   - template: ../templates/stage-cd.yml
     parameters:
       environment: 'Prod'
-      pool: 'Pool-Prod'                    # <!-- CAMBIAR -->
-      variableGroup: 'vg-miapp-prod'       # <!-- CAMBIAR -->
-      artifactName: 'MiAppNode'            # <!-- CAMBIAR — debe coincidir con CI -->
-      deployPath: 'C:\inetpub\wwwroot\MiAppNode'      # <!-- CAMBIAR -->
-      backupPath: 'C:\deploy-backups\MiAppNode'        # <!-- CAMBIAR -->
+      pool: 'Pool-Prod'
+      variableGroup: 'vg-miapp-prod'
+      artifactName: 'MiAppNode'
+      deployPath: 'C:\inetpub\wwwroot\MiAppNode'
+      backupPath: 'C:\deploy-backups\MiAppNode'
       healthCheckEndpoint: '/'
       dependsOn: 'CD_Test'
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"

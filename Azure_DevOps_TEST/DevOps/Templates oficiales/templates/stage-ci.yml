@@ -1,33 +1,4 @@
-# =============================================================================
-# TEMPLATE: Stage CI — Wrapper para Build, Test, SCA & Fortify Package
-# =============================================================================
-# Capa:       Stage (intermedia — se invoca desde el pipeline principal)
-# Propósito:  Encapsular el template de steps CI con pool y configuración
-# Agente:     Microsoft-hosted (efímero, CON salida a internet)
-#
-# Este stage:
-#   1. Ejecuta en un agente limpio de Microsoft (sin estado previo)
-#   2. Compila, prueba, escanea dependencias (Snyk SCA) y empaqueta
-#      el código para Fortify ScanCentral (offline)
-#   3. Publica 2 artefactos inmutables:
-#      - Aplicación compilada (para CD)
-#      - scancentral-pkg.zip (para SAST)
-#
-# REQUISITOS DE RED (agente MS-hosted):
-#   ✅ Acceso a internet (Snyk SaaS, NuGet, npm)
-#   ❌ NO tiene acceso al controlador Fortify (on-prem)
-#
-# USO:
-#   stages:
-#     - template: templates/stage-ci.yml
-#       parameters:
-#         technology: 'dotnet'
-#         projectPath: 'src/MiApp/MiApp.csproj'
-#         artifactName: 'MiApp'
-# =============================================================================
-
 parameters:
-  # ─── Tecnología ───────────────────────────────────────────────
   - name: technology
     type: string
     default: 'dotnet'
@@ -36,15 +7,10 @@ parameters:
       - nodejs
       - custom
 
-  # ─── Pool del agente CI ───────────────────────────────────────
-  # Microsoft-hosted. Cambiar vmImage según necesidad:
-  #   - 'windows-latest' para .NET Framework o builds Windows-only
-  #   - 'ubuntu-latest' para Node.js, .NET Core multiplataforma
   - name: vmImage
     type: string
     default: 'windows-latest'
 
-  # ─── Parámetros comunes ───────────────────────────────────────
   - name: artifactName
     type: string
     default: 'WebApp'
@@ -53,7 +19,6 @@ parameters:
     type: string
     default: 'Release'
 
-  # ─── Parámetros .NET ──────────────────────────────────────────
   - name: dotnetVersion
     type: string
     default: '8.x'
@@ -70,7 +35,6 @@ parameters:
     type: string
     default: ''
 
-  # ─── Parámetros Node.js ──────────────────────────────────────
   - name: nodeVersion
     type: string
     default: '20.x'
@@ -91,7 +55,6 @@ parameters:
     type: string
     default: 'dist'
 
-  # ─── Seguridad — Snyk SCA ────────────────────────────────────
   - name: enableSnykSCA
     type: boolean
     default: true
@@ -104,12 +67,10 @@ parameters:
     type: boolean
     default: false
 
-  # ─── Seguridad — Escaneo nativo (alternativa) ────────────────
   - name: enableNativeDependencyScan
     type: boolean
     default: true
 
-  # ─── Fortify ScanCentral — Empaquetado offline ────────────────
   - name: enableFortifyPackage
     type: boolean
     default: true
@@ -118,7 +79,6 @@ parameters:
     type: string
     default: ''
 
-  # ─── Steps adicionales ────────────────────────────────────────
   - name: prePublishSteps
     type: stepList
     default: []
@@ -137,25 +97,19 @@ stages:
               technology: ${{ parameters.technology }}
               artifactName: ${{ parameters.artifactName }}
               buildConfiguration: ${{ parameters.buildConfiguration }}
-              # .NET
               dotnetVersion: ${{ parameters.dotnetVersion }}
               projectPath: ${{ parameters.projectPath }}
               runTests: ${{ parameters.runTests }}
               testProjectPath: ${{ parameters.testProjectPath }}
-              # Node.js
               nodeVersion: ${{ parameters.nodeVersion }}
               packageManager: ${{ parameters.packageManager }}
               buildScript: ${{ parameters.buildScript }}
               testScript: ${{ parameters.testScript }}
               outputFolder: ${{ parameters.outputFolder }}
-              # Seguridad — Snyk SCA
               enableSnykSCA: ${{ parameters.enableSnykSCA }}
               snykServiceConnection: ${{ parameters.snykServiceConnection }}
               snykFailOnIssues: ${{ parameters.snykFailOnIssues }}
-              # Seguridad — Escaneo nativo
               enableNativeDependencyScan: ${{ parameters.enableNativeDependencyScan }}
-              # Fortify ScanCentral Package
               enableFortifyPackage: ${{ parameters.enableFortifyPackage }}
               fortifyBuildId: ${{ parameters.fortifyBuildId }}
-              # Custom
               prePublishSteps: ${{ parameters.prePublishSteps }}

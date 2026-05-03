@@ -41,12 +41,6 @@
 # =============================================================================
 
 parameters:
-  # ─────────────────────────────────────────────────────────────
-  # Parámetro principal: selecciona la tecnología de build
-  # Valores: 'dotnet' | 'nodejs' | 'custom'
-  # Con 'custom', solo se ejecutan scan + publish; los steps de
-  # build/test se deben agregar en el pipeline que consume este template.
-  # ─────────────────────────────────────────────────────────────
   - name: technology
     type: string
     default: 'dotnet'
@@ -55,7 +49,6 @@ parameters:
       - nodejs
       - custom
 
-  # ─── Parámetros comunes ───────────────────────────────────────
   - name: artifactName
     type: string
     default: 'WebApp'
@@ -64,7 +57,6 @@ parameters:
     type: string
     default: 'Release'
 
-  # ─── Parámetros .NET ──────────────────────────────────────────
   - name: dotnetVersion
     type: string
     default: '8.x'
@@ -72,7 +64,6 @@ parameters:
   - name: projectPath
     type: string
     default: ''
-    # Ruta al .csproj o .sln — obligatorio para technology: dotnet
 
   - name: runTests
     type: boolean
@@ -81,9 +72,7 @@ parameters:
   - name: testProjectPath
     type: string
     default: ''
-    # Si vacío y runTests=true, busca **/*Tests*.csproj
 
-  # ─── Parámetros Node.js ──────────────────────────────────────
   - name: nodeVersion
     type: string
     default: '20.x'
@@ -98,7 +87,6 @@ parameters:
   - name: buildScript
     type: string
     default: 'build'
-    # Nombre del script en package.json (npm run <buildScript>)
 
   - name: testScript
     type: string
@@ -107,52 +95,31 @@ parameters:
   - name: outputFolder
     type: string
     default: 'dist'
-    # Carpeta de salida del build (se publica como artefacto)
 
-  # ─── Seguridad — Snyk SCA ────────────────────────────────────
   - name: enableSnykSCA
     type: boolean
     default: true
-    # Escaneo de dependencias (SCA) con Snyk Open Source.
-    # Requiere: extensión Snyk + Service Connection 'sc-snyk'
-    # Analiza: NuGet packages (.NET) o npm/yarn deps (Node.js)
 
   - name: snykServiceConnection
     type: string
     default: 'sc-snyk'
-    # Nombre del Service Connection configurado para Snyk en Azure DevOps.
-    # Crear en: Project Settings > Service connections > New > Snyk
 
   - name: snykFailOnIssues
     type: boolean
     default: false
-    # Si true, el pipeline falla cuando Snyk encuentre vulnerabilidades.
-    # Recomendación: false inicialmente, migrar a true cuando se estabilice.
 
-  # ─── Seguridad — Escaneo nativo de dependencias (alternativa) ─
   - name: enableNativeDependencyScan
     type: boolean
     default: true
-    # Escaneo nativo como alternativa/complemento a Snyk:
-    #   .NET:    dotnet list package --vulnerable
-    #   Node.js: npm audit
-    # Útil cuando Snyk no está disponible o como segunda opinión.
 
-  # ─── Fortify ScanCentral — Empaquetado offline ────────────────
   - name: enableFortifyPackage
     type: boolean
     default: true
-    # Empaqueta el código compilado para análisis SAST con Fortify ScanCentral.
-    # El paquete se envía al controlador on-prem en el stage SAST posterior.
-    # Requiere: extensión Fortify instalada desde el Marketplace.
 
   - name: fortifyBuildId
     type: string
     default: ''
-    # Identificador del build para ScanCentral.
-    # Si vacío, se usa artifactName como fallback.
 
-  # ─── Steps adicionales (inyección de steps custom antes del publish) ───
   - name: prePublishSteps
     type: stepList
     default: []
@@ -226,7 +193,6 @@ steps:
   - ${{ if and(eq(parameters.technology, 'nodejs'), eq(parameters.runTests, true)) }}:
     - script: ${{ parameters.packageManager }} run ${{ parameters.testScript }}
       displayName: '🧪 Test — ${{ parameters.packageManager }} run ${{ parameters.testScript }}'
-      # continueOnError: true
 
   # ===========================================================================
   # SECCIÓN 4: SECURITY — Snyk SCA (Análisis de Composición de Software)
@@ -250,8 +216,6 @@ steps:
         serviceConnectionEndpoint: '${{ parameters.snykServiceConnection }}'
         testType: 'app'
         failOnIssues: ${{ parameters.snykFailOnIssues }}
-        # monitorOnBuild: true  # Descomentar para monitorear en el dashboard de Snyk
-      # continueOnError: true
 
   # ===========================================================================
   # SECCIÓN 4.5: DEPENDENCY SCAN NATIVO (alternativa/complemento a Snyk)
@@ -259,7 +223,6 @@ steps:
   # Herramientas nativas del ecosistema como alternativa cuando Snyk no está
   # disponible, o como segunda capa de verificación.
   - ${{ if eq(parameters.enableNativeDependencyScan, true) }}:
-    # .NET: auditoría de paquetes NuGet
     - ${{ if eq(parameters.technology, 'dotnet') }}:
       - task: DotNetCoreCLI@2
         displayName: '🔍 Dependency Scan — NuGet Audit'
@@ -270,7 +233,6 @@ steps:
           projects: '${{ parameters.projectPath }}'
         continueOnError: true
 
-    # Node.js: npm audit
     - ${{ if eq(parameters.technology, 'nodejs') }}:
       - script: npm audit --audit-level=high || true
         displayName: '🔍 Dependency Scan — npm audit'
@@ -283,17 +245,11 @@ steps:
   # (scancentral-pkg.zip) que será enviado al controlador Fortify
   # ScanCentral on-prem en el stage SAST posterior.
   #
-  # ¿Por qué empaquetar aquí?
-  #   - El agente MS-hosted tiene el código y las herramientas de build
-  #   - El controlador Fortify está on-prem SIN internet
-  #   - El paquete viaja como artefacto del pipeline (via Azure DevOps)
-  #
   # REQUISITOS:
   #   1. Extensión "Fortify" instalada desde Azure DevOps Marketplace
   #      https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
   #   2. La extensión provee el cliente ScanCentral en el agente
   - ${{ if eq(parameters.enableFortifyPackage, true) }}:
-    # ── .NET: empaquetar con build tool msbuild ──────────────────
     - ${{ if eq(parameters.technology, 'dotnet') }}:
       - powershell: |
           $buildId    = "${{ coalesce(parameters.fortifyBuildId, parameters.artifactName) }}"
@@ -323,7 +279,6 @@ steps:
           Write-Host "✅ Paquete creado: $outputFile ($([math]::Round($size, 2)) MB)"
         displayName: '📦 Fortify ScanCentral — Package (.NET)'
 
-    # ── Node.js: empaquetar sin build tool específico ────────────
     - ${{ if eq(parameters.technology, 'nodejs') }}:
       - script: |
           echo "═══════════════════════════════════════════════"
@@ -338,7 +293,6 @@ steps:
               -o "$(Build.ArtifactStagingDirectory)/scancentral-pkg.zip"
         displayName: '📦 Fortify ScanCentral — Package (Node.js)'
 
-    # ── Publicar paquete ScanCentral como artefacto separado ─────
     - publish: $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip
       artifact: 'FortifyPackage-$(Build.BuildNumber)'
       displayName: '📄 Publicar Paquete ScanCentral'
@@ -346,8 +300,6 @@ steps:
   # ===========================================================================
   # SECCIÓN 6: STEPS ADICIONALES (pre-publish hook)
   # ===========================================================================
-  # Permite inyectar steps personalizados antes de publicar el artefacto.
-  # Útil para: transformaciones de config, análisis adicionales, etc.
   - ${{ each step in parameters.prePublishSteps }}:
     - ${{ step }}
 
@@ -377,8 +329,6 @@ steps:
         TargetFolder: '$(Build.ArtifactStagingDirectory)/app'
 
   # ─── Publicar artefacto versionado de la aplicación ──────────────────────
-  # Nombre incluye BuildNumber y branch para trazabilidad completa.
-  # Este artefacto se descarga tal cual en cada environment de CD.
   - publish: $(Build.ArtifactStagingDirectory)/app
     artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
     displayName: '📦 Publicar Artefacto de Aplicación'

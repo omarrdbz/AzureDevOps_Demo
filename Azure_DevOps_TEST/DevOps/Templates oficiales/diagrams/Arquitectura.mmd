@@ -1,162 +1,66 @@
 graph TD
-    %% ═══════════════════════════════════════════════════════════════
-    %% ARQUITECTURA HÍBRIDA — Fortify ScanCentral + Snyk
-    %% Pipeline: CI → SAST → CD_Test → CD_Prod
-    %% ═══════════════════════════════════════════════════════════════
+    subgraph CLOUD["Azure DevOps y SaaS"]
+        REPO["Azure Repos"]
+        PIPE["Azure Pipelines"]
+        ART["Azure Artifacts<br/>app + FortifyPackage"]
+        ENV["Environments<br/>aprobaciones y checks"]
+        LIB["Variable Groups<br/>secretos"]
+        CI["Microsoft-hosted agent<br/>CI"]
+        SNYK["Snyk Open Source<br/>SCA"]
+        DAST["Snyk API & Web<br/>DAST"]
 
-    %% ─────────────────────────────────────────────────────────────
-    %% ZONA 1: Nube (Azure DevOps + SaaS)
-    %% ─────────────────────────────────────────────────────────────
-    subgraph CLOUD["☁️ Nube — Azure DevOps + SaaS"]
-        direction TB
-
-        subgraph AZDO["Azure DevOps Services"]
-            REPOS["📂 Azure Repos<br/>(Código Fuente)"]
-            PIPE["⚙️ Azure Pipelines<br/>(Orquestador)"]
-            ARTIFACTS["📦 Azure Artifacts<br/>(Almacén Inmutable)"]
-            ENVS["🔒 Environments<br/>(Aprobaciones + Checks)"]
-            LIBRARY["🔑 Variable Groups<br/>(Secretos Cifrados)"]
-        end
-
-        subgraph MSAGENT["🖥️ Microsoft-Hosted Agent — Stage CI"]
-            direction TB
-            CI_SDK["🔧 SDK Setup<br/>(.NET / Node.js)"]
-            CI_BUILD["🔨 Build + Test"]
-            CI_SNYK["🛡️ Snyk SCA<br/>(Dependencias)"]
-            CI_NATIVE["🔍 NuGet Audit / npm audit<br/>(Alternativa Nativa)"]
-            CI_FORTPKG["📦 ScanCentral Package<br/>(Empaquetado Offline)"]
-            CI_PUB1["📤 Artefacto 1:<br/>App Compilada"]
-            CI_PUB2["📤 Artefacto 2:<br/>scancentral-pkg.zip"]
-
-            CI_SDK --> CI_BUILD --> CI_SNYK --> CI_NATIVE --> CI_FORTPKG
-            CI_FORTPKG --> CI_PUB1
-            CI_FORTPKG --> CI_PUB2
-        end
-
-        subgraph SNYK_SAAS["🌐 Snyk SaaS + Probely"]
-            SNYK_SCA["🔍 Snyk Open Source<br/>(SCA Engine)"]
-            SNYK_DAST["🔍 Snyk API & Web<br/>(Probely DAST Engine)"]
-            SNYK_DASH["📊 Snyk Dashboard<br/>(Reportes)"]
-        end
-
-        REPOS -->|"1. Trigger + Checkout"| PIPE
-        PIPE -->|"2. Asigna agente"| MSAGENT
-        LIBRARY -.->|"Inyecta secretos"| MSAGENT
-        CI_SNYK -->|"HTTPS 443"| SNYK_SCA
-        CI_PUB1 -->|"Publica"| ARTIFACTS
-        CI_PUB2 -->|"Publica"| ARTIFACTS
+        REPO --> PIPE
+        PIPE --> CI
+        LIB -.-> CI
+        CI -->|"Build, test, package"| ART
+        CI -->|"SCA HTTPS 443"| SNYK
     end
 
-    %% ─────────────────────────────────────────────────────────────
-    %% ZONA 2: Red Corporativa On-Premise
-    %% ─────────────────────────────────────────────────────────────
-    subgraph ONPREM["🏢 Red Corporativa On-Premise"]
-        direction TB
+    subgraph ONPREM["Red corporativa"]
+        FW["Firewall / NAT<br/>salida 443 controlada"]
 
-        FW["🔥 Firewall / NAT<br/>(Outbound 443 selectivo)"]
+        subgraph SAST_ZONE["SAST on-prem"]
+            SAST["Self-hosted agent<br/>Stage SAST"]
+            SC["ScanCentral Controller"]
+            SENSOR["ScanCentral Sensors"]
+            SSC["Fortify SSC<br/>Quality Gate"]
 
-        subgraph DMZ["🛡️ DMZ — Agentes Self-Hosted"]
-            direction TB
-
-            subgraph SAST_AGENT["Self-Hosted Agent — Stage SAST"]
-                SAST_DL["📥 Download<br/>scancentral-pkg.zip"]
-                SAST_SUBMIT["🚀 ScanCentral Start<br/>(-upload -block)"]
-                SAST_QG["🚦 Quality Gate<br/>(SSC API Query)"]
-
-                SAST_DL --> SAST_SUBMIT --> SAST_QG
-            end
-
-            subgraph CD_AGENT_TEST["Self-Hosted Agent — Stage CD Test (Pool-Test)"]
-                CD_DL_T["📥 Download<br/>App Compilada"]
-                CD_BACKUP_T["💾 Backup<br/>Pre-Deploy"]
-                CD_DEPLOY_T["🚀 WebDeploy<br/>(msdeploy.exe)"]
-                CD_HC_T["🏥 Health Check<br/>+ Auto-Rollback"]
-                CD_DAST_T["🔍 Snyk DAST<br/>(Post-Deploy)"]
-
-                CD_DL_T --> CD_BACKUP_T --> CD_DEPLOY_T --> CD_HC_T --> CD_DAST_T
-            end
-
-            subgraph CD_AGENT_PROD["Self-Hosted Agent — Stage CD Prod (Pool-Prod)"]
-                CD_DL_P["📥 Download<br/>App Compilada"]
-                CD_BACKUP_P["💾 Backup<br/>Pre-Deploy"]
-                CD_DEPLOY_P["🚀 WebDeploy<br/>(msdeploy.exe)"]
-                CD_HC_P["🏥 Health Check<br/>+ Auto-Rollback"]
-
-                CD_DL_P --> CD_BACKUP_P --> CD_DEPLOY_P --> CD_HC_P
-            end
+            SAST -->|"scancentral start -upload -block"| SC
+            SC --> SENSOR
+            SENSOR -->|"resultados"| SSC
+            SAST -->|"consulta API"| SSC
         end
 
-        subgraph FORTIFY["🏰 Fortify Infrastructure (Red Interna)"]
-            direction LR
-            SC_CTRL["🎛️ ScanCentral<br/>Controller"]
-            SC_WORKERS["⚡ ScanCentral<br/>Workers/Sensors"]
-            SSC["📊 Fortify SSC<br/>(Software Security Center)"]
+        subgraph CD_ZONE["CD on-prem"]
+            CD_TEST["Self-hosted agent<br/>CD Test"]
+            CD_PROD["Self-hosted agent<br/>CD Prod"]
+            IIS_TEST["IIS Test"]
+            IIS_PROD["IIS Prod"]
 
-            SC_CTRL -->|"Distribuye scans"| SC_WORKERS
-            SC_WORKERS -->|"Sube resultados .fpr"| SSC
+            CD_TEST -->|"backup + Web Deploy + health check"| IIS_TEST
+            CD_PROD -->|"backup + Web Deploy + health check"| IIS_PROD
         end
-
-        subgraph SERVERS["🖧 Servidores de Aplicación (Red Interna)"]
-            direction LR
-            IIS_QA["🌐 IIS — QA/Test<br/>(puerto 80/443)"]
-            IIS_PROD["🌐 IIS — Producción<br/>(puerto 80/443)"]
-        end
-
-        %% Conexiones SAST
-        SAST_SUBMIT -->|"Puerto 8080/8443"| SC_CTRL
-        SAST_QG -->|"REST API /ssc/api/v1"| SSC
-
-        %% Conexiones CD Test
-        CD_DEPLOY_T -->|"WebDeploy<br/>Puerto 8172 (WMSVC)"| IIS_QA
-        CD_DAST_T -->|"HTTPS 443"| FW
-
-        %% Conexiones CD Prod
-        CD_DEPLOY_P -->|"WebDeploy<br/>Puerto 8172 (WMSVC)"| IIS_PROD
     end
 
-    %% ─────────────────────────────────────────────────────────────
-    %% CONEXIONES TRANSFRONTERIZAS (Cloud ↔ On-Prem)
-    %% ─────────────────────────────────────────────────────────────
-    ARTIFACTS -->|"Outbound 443:<br/>Download Artefactos"| FW
-    FW -->|"Rutas internas"| SAST_DL
-    FW -->|"Rutas internas"| CD_DL_T
-    FW -->|"Rutas internas"| CD_DL_P
-    FW -->|"Outbound 443"| SNYK_DAST
-    ENVS -.->|"⚠️ Aprobación<br/>obligatoria Prod"| CD_AGENT_PROD
+    ART -->|"descarga de artefactos HTTPS 443"| FW
+    FW --> SAST
+    FW --> CD_TEST
+    FW --> CD_PROD
+    CD_TEST -->|"scan DAST HTTPS 443"| DAST
+    DAST -->|"pruebas contra URL registrada"| IIS_TEST
+    ENV -.->|"aprobación Prod"| CD_PROD
 
-    %% ─────────────────────────────────────────────────────────────
-    %% FLUJO ENTRE STAGES (dependencias)
-    %% ─────────────────────────────────────────────────────────────
-    MSAGENT ==>|"Stage 1 ✅ → Stage 2"| SAST_AGENT
-    SAST_AGENT ==>|"Stage 2 ✅ → Stage 3"| CD_AGENT_TEST
-    CD_AGENT_TEST ==>|"Stage 3 ✅ → Stage 4"| CD_AGENT_PROD
+    CI ==>|"CI aprobado"| SAST
+    SAST ==>|"SAST aprobado"| CD_TEST
+    CD_TEST ==>|"Test aprobado"| CD_PROD
 
-    %% ─────────────────────────────────────────────────────────────
-    %% ESTILOS
-    %% ─────────────────────────────────────────────────────────────
-    style CLOUD fill:#e8f4fd,stroke:#0078d4,stroke-width:2px
-    style ONPREM fill:#f5f0e8,stroke:#8b7355,stroke-width:2px
-    style AZDO fill:#d4e8ff,stroke:#0078d4
-    style MSAGENT fill:#cce5ff,stroke:#0078d4,stroke-width:2px
-    style SNYK_SAAS fill:#e8e0f0,stroke:#4c4a73,stroke-width:2px
-    style DMZ fill:#e8f5e8,stroke:#107c10
-    style SAST_AGENT fill:#ffe8e8,stroke:#d83b01,stroke-width:2px
-    style CD_AGENT_TEST fill:#e8f5e8,stroke:#107c10,stroke-width:2px
-    style CD_AGENT_PROD fill:#fff3e0,stroke:#ff8c00,stroke-width:2px
-    style FORTIFY fill:#fce4e4,stroke:#c50f1f
-    style SERVERS fill:#d4e8ff,stroke:#2b88d8
-    style FW fill:#fff3cd,stroke:#856404,stroke-width:3px
-    style REPOS fill:#0078d4,color:#fff
-    style PIPE fill:#0078d4,color:#fff
-    style ARTIFACTS fill:#0078d4,color:#fff
-    style ENVS fill:#0078d4,color:#fff
-    style LIBRARY fill:#0078d4,color:#fff
-    style SNYK_SCA fill:#4c4a73,color:#fff
-    style SNYK_DAST fill:#4c4a73,color:#fff
-    style SNYK_DASH fill:#4c4a73,color:#fff
-    style SC_CTRL fill:#c50f1f,color:#fff
-    style SC_WORKERS fill:#c50f1f,color:#fff
+    style CLOUD fill:#eef5ff,stroke:#0078d4
+    style ONPREM fill:#f7f7f7,stroke:#555
+    style SAST_ZONE fill:#fff1f1,stroke:#c50f1f
+    style CD_ZONE fill:#eef8f0,stroke:#107c10
+    style FW fill:#fff7df,stroke:#856404
+    style SNYK fill:#4c4a73,color:#fff
+    style DAST fill:#4c4a73,color:#fff
     style SSC fill:#c50f1f,color:#fff
-    style IIS_QA fill:#2b88d8,color:#fff
+    style IIS_TEST fill:#2b88d8,color:#fff
     style IIS_PROD fill:#ff8c00,color:#fff
-    style SAST_QG fill:#d83b01,color:#fff

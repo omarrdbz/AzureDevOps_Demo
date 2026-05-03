@@ -33,33 +33,29 @@
 # =============================================================================
 
 parameters:
-  # ─── Identificación del artefacto ─────────────────────────────
+  - name: environment
+    type: string
+    default: ''
+
   - name: artifactName
     type: string
     default: 'WebApp'
 
-  # ─── Rutas en el servidor ─────────────────────────────────────
   - name: deployPath
     type: string
     default: 'C:\inetpub\wwwroot\WebApp'
-    # Ruta física del sitio IIS en el servidor destino
 
   - name: backupPath
     type: string
     default: 'C:\deploy-backups\WebApp'
-    # Carpeta donde se guardan los backups rotativos
 
-  # ─── Web Deploy ───────────────────────────────────────────────
   - name: msdeployPath
     type: string
     default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
 
-  # ─── Health Check ─────────────────────────────────────────────
   - name: healthCheckEndpoint
     type: string
     default: '/health'
-    # Endpoint que retorna HTTP 200 si la app está healthy.
-    # Para apps sin health check dedicado, usar '/' (homepage).
 
   - name: healthCheckRetries
     type: number
@@ -68,31 +64,15 @@ parameters:
   - name: healthCheckDelaySeconds
     type: number
     default: 10
-    # Segundos de espera entre reintentos de health check
 
-  # ─── Rollback y retención ─────────────────────────────────────
   - name: enableAutoRollback
     type: boolean
     default: true
-    # Si el health check falla, restaurar automáticamente el backup
 
   - name: maxBackups
     type: number
     default: 5
-    # Cantidad máxima de backups a retener (los más antiguos se eliminan)
 
-  # ─── Snyk API & Web DAST — Escaneo dinámico post-deploy ────────
-  # Integración con Snyk API & Web (anteriormente Probely).
-  # Ejecuta un escaneo DAST real contra la URL de la aplicación desplegada.
-
-  # REQUISITOS:
-  #   1. Probely CLI pre-instalada en el agente: pip install probely
-  #   2. Target ID configurado en Snyk API & Web para la URL del sitio
-  #   3. API Key de Snyk API & Web (JWT) — distinta al token de Snyk SCA
-  #   4. Salida a api.probely.com:443 desde el agente on-prem
-  #
-  # CREDENCIALES (en Variable Group del entorno):
-  #   ProbelyApiKey      🔒 secreto — API Key JWT de Snyk API & Web / Probely
   - name: enableSnykApiWebDAST
     type: boolean
     default: false
@@ -100,13 +80,10 @@ parameters:
   - name: snykApiWebTargetId
     type: string
     default: ''
-    # Target ID registrado en Snyk API & Web para la URL del sitio.
-    # Obtener desde: Snyk API & Web → Targets → seleccionar target → copiar ID.
 
   - name: snykApiWebScanProfile
     type: string
     default: 'normal'
-    # Perfil de escaneo: 'lightning' (rápido), 'normal', 'safe' (no-intrusivo)
     values:
       - lightning
       - normal
@@ -115,14 +92,10 @@ parameters:
   - name: snykApiWebTimeoutMinutes
     type: number
     default: 60
-    # Tiempo máximo de espera para que el scan DAST complete.
-    # Si se excede, el step falla. Recomendado: 60-120 min.
 
   - name: snykApiWebSeverityThreshold
     type: string
     default: 'HIGH'
-    # Severidad mínima para fallar el pipeline.
-    # Valores: LOW | MEDIUM | HIGH | CRITICAL
     values:
       - LOW
       - MEDIUM
@@ -132,15 +105,11 @@ parameters:
   - name: snykApiWebFailOnIssues
     type: boolean
     default: true
-    # Si true, el pipeline falla cuando se encuentran vulnerabilidades
-    # sobre el umbral configurado en snykApiWebSeverityThreshold.
 
 steps:
   # ===========================================================================
   # PASO 1: Descargar artefacto inmutable construido en CI
   # ===========================================================================
-  # El artefacto fue publicado en CI con nombre versionado.
-  # Se descarga exactamente el mismo binario sin recompilar.
   - download: current
     artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
     displayName: '📥 Descargar Artefacto'
@@ -148,8 +117,6 @@ steps:
   # ===========================================================================
   # PASO 2: Backup pre-deploy (OBLIGATORIO)
   # ===========================================================================
-  # Crea una copia timestamped de la aplicación actual antes de sobrescribirla.
-  # Guarda la ruta del backup en la variable LastBackupPath para uso en rollback.
   - powershell: |
       $deployPath = "${{ parameters.deployPath }}"
       $backupPath = "${{ parameters.backupPath }}"
@@ -205,8 +172,6 @@ steps:
   # ===========================================================================
   # PASO 4: Verificar que el sitio IIS existe
   # ===========================================================================
-  # El sitio debe existir previamente (creado via script bootstrap).
-  # Si no existe, el pipeline falla con instrucciones claras de cómo resolverlo.
   - powershell: |
       $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
       $site   = "$(WebsiteName)"
@@ -242,7 +207,6 @@ steps:
       $site         = "$(WebsiteName)"
       $artifactPath = "$(Pipeline.Workspace)/${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)"
 
-      # Verificar que msdeploy.exe existe en el servidor
       if (-not (Test-Path $msdeployExe)) {
           throw "msdeploy.exe no encontrado en: $msdeployExe. Instalar Web Deploy 3.6+ (ver guia-web-deploy-iis.md Sección 2)"
       }
@@ -256,7 +220,6 @@ steps:
       Write-Host "  Entorno:     ${{ parameters.environment }}"
       Write-Host "═══════════════════════════════════════════════"
 
-      # Construir argumentos de msdeploy de forma segura
       $msdeployArgs = @(
           "-verb:sync",
           "-source:contentPath=`"$artifactPath`"",
@@ -277,8 +240,6 @@ steps:
       Write-Host "✅ Deploy completado exitosamente via Web Deploy"
     displayName: '🚀 Deploy — Web Deploy (msdeploy.exe)'
     env:
-      # Los secretos se pasan como env vars para evitar exposición en logs.
-      # Estas variables deben estar definidas en el Variable Group del entorno.
       WEBDEPLOY_USER: $(WebDeployUser)
       WEBDEPLOY_PASSWORD: $(WebDeployPassword)
 
@@ -307,7 +268,6 @@ steps:
       Write-Host "  Rollback: $(if ($enableRollback) { 'Habilitado' } else { 'Deshabilitado' })"
       Write-Host "═══════════════════════════════════════════════"
 
-      # Esperar que la aplicación inicie
       Start-Sleep -Seconds 5
 
       $success = $false
@@ -332,7 +292,6 @@ steps:
           }
       }
 
-      # Si el health check falló, intentar rollback automático
       if (-not $success) {
           if ($enableRollback -and $lastBackup -and (Test-Path $lastBackup)) {
               Write-Host ""
@@ -345,21 +304,20 @@ steps:
               & $appcmd stop site /site.name:"$websiteName" 2>$null
               Start-Sleep -Seconds 3
 
-            #   # Validar que deployPath es seguro antes de borrar
-            #   $resolvedPath = (Resolve-Path $deployPath -ErrorAction SilentlyContinue).Path
-            #   $safePrefixes = @("C:\inetpub\", "D:\inetpub\", "C:\deploy", "D:\deploy", "C:\sites\", "D:\sites\")
-            #   $isSafe = $false
-            #   foreach ($prefix in $safePrefixes) {
-            #       if ($resolvedPath -and $resolvedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            #           $isSafe = $true
-            #           break
-            #       }
-            #   }
-            #   if (-not $isSafe) {
-            #       Write-Host "##vso[task.logissue type=error]Rollback abortado: deployPath '$deployPath' no está bajo un directorio seguro conocido."
-            #       Write-Host "Directorios seguros: $($safePrefixes -join ', ')"
-            #       throw "Rollback abortado por seguridad — ruta no confiable: $deployPath"
-            #   }
+              $resolvedPath = (Resolve-Path $deployPath -ErrorAction SilentlyContinue).Path
+              $safePrefixes = @("C:\inetpub\", "D:\inetpub\", "C:\deploy\", "D:\deploy\", "C:\sites\", "D:\sites\")
+              $isSafe = $false
+              foreach ($prefix in $safePrefixes) {
+                  if ($resolvedPath -and $resolvedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                      $isSafe = $true
+                      break
+                  }
+              }
+              if (-not $isSafe) {
+                  Write-Host "##vso[task.logissue type=error]Rollback abortado: deployPath '$deployPath' no está bajo un directorio seguro permitido."
+                  Write-Host "Directorios permitidos: $($safePrefixes -join ', ')"
+                  throw "Rollback abortado por ruta no confiable: $deployPath"
+              }
 
               Remove-Item "$deployPath\*" -Recurse -Force -ErrorAction SilentlyContinue
               Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
@@ -377,22 +335,6 @@ steps:
   # ===========================================================================
   # PASO 7: DAST — Snyk API & Web (Probely)
   # ===========================================================================
-  # Ejecuta un escaneo DAST real contra la aplicación desplegada usando
-  # Snyk API & Web (motor Probely).
-  # Integración basada en la documentación oficial:
-  #   - API: POST https://api.probely.com/targets/<TARGET_ID>/scan_now/
-  #   - CLI: probely targets follow-scan <TARGET_ID> (modo bloqueante)
-  #
-  # Modo enterprise recomendado:
-  #   Dispara el scan, espera resultados (blocking), y falla según severidad.
-  #   Usa `probely targets follow-scan` con --timeout y --severity-threshold.
-  #
-  # REQUISITOS:
-  #   1. Probely CLI pre-instalada en el agente (pip install probely)
-  #      O se instala en runtime si no existe
-  #   2. Target ID del sitio registrado en Snyk API & Web
-  #   3. API Key JWT de Snyk API & Web
-  #   4. Salida a api.probely.com:443 desde el agente on-prem
   - ${{ if eq(parameters.enableSnykApiWebDAST, true) }}:
     - powershell: |
         $targetId          = "${{ parameters.snykApiWebTargetId }}"
@@ -411,7 +353,6 @@ steps:
         Write-Host "  Fail on Issues:      $failOnIssues"
         Write-Host "═══════════════════════════════════════════════"
 
-        # ── Validar parámetros obligatorios ──
         if ([string]::IsNullOrWhiteSpace($targetId)) {
             Write-Host "##vso[task.logissue type=error]snykApiWebTargetId es requerido para DAST."
             Write-Host "Obtener el Target ID desde: Snyk API & Web > Targets > seleccionar target > copiar ID."
@@ -424,39 +365,19 @@ steps:
             exit 1
         }
 
-        # ── Verificar/instalar Probely CLI ──
-        # RECOMENDACIÓN: Pre-instalar Probely CLI en el agente (pip install probely)
-        # para mayor reproducibilidad. El fallback de instalación en runtime se
-        # mantiene para primer uso, pero NO es la práctica recomendada en producción.
         $probelyCmd = Get-Command probely -ErrorAction SilentlyContinue
         if (-not $probelyCmd) {
-            Write-Host "##vso[task.logissue type=warning]Probely CLI no pre-instalada en el agente. Instalando en runtime (no recomendado para producción)."
-            python -m pip install --upgrade probely 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "##vso[task.logissue type=error]No se pudo instalar Probely CLI."
-                Write-Host "Instalar manualmente en el agente: pip install probely"
-                exit 1
-            }
-            Write-Host "✅ Probely CLI instalada (considerar pre-instalar en el agente)"
+            Write-Host "##vso[task.logissue type=error]Probely CLI no está instalada en el agente."
+            Write-Host "Instalar en la imagen/base del agente: pip install probely"
+            exit 1
         } else {
             Write-Host "Probely CLI: $($probelyCmd.Source)"
         }
 
-        # ── Ejecutar DAST en modo bloqueante (enterprise) ──
-        # `probely targets follow-scan` dispara el scan y espera resultados.
-        # --severity-threshold: falla si hay vulnerabilidades >= umbral
-        # --timeout: tiempo máximo de espera en minutos
-        # --continue-scan: si se interrumpe el pipeline, el scan sigue en Probely
-        # -o JSON: output en JSON para parseo posterior si necesario
         Write-Host "`nIniciando DAST scan en modo bloqueante..."
 
-        # ── Generar config YAML con scan_profile ──
-        # La CLI soporta --yaml-file / -f para pasar configuración de scan.
-        # Esto hace efectivo el parámetro snykApiWebScanProfile.
         $scanConfigPath = Join-Path "$(Agent.TempDirectory)" "snyk-api-web-scan.yml"
-        @"
-scan_profile: $scanProfile
-"@ | Set-Content -Path $scanConfigPath -Encoding UTF8
+        Set-Content -Path $scanConfigPath -Value "scan_profile: $scanProfile" -Encoding UTF8
         Write-Host "  Config file:         $scanConfigPath"
 
         $probelyArgs = @(
@@ -468,8 +389,6 @@ scan_profile: $scanProfile
             "-o", "JSON"
         )
 
-        # PROBELY_API_KEY se inyecta como env var (estándar de la CLI).
-        # No se pasa --api-key en la línea de comandos por seguridad.
         probely @probelyArgs 2>&1 | Tee-Object -Variable probelyOutput
         $exitCode = $LASTEXITCODE
 
@@ -494,7 +413,6 @@ scan_profile: $scanProfile
   # ===========================================================================
   # PASO 8: Resumen del Deploy
   # ===========================================================================
-  # Se ejecuta siempre (exitoso o fallido) para tener trazabilidad completa.
   - powershell: |
       Write-Host "═══════════════════════════════════════════════"
       Write-Host "  DEPLOY SUMMARY"
