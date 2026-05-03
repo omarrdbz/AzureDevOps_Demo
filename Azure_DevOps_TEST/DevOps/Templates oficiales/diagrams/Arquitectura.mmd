@@ -1,0 +1,66 @@
+graph TD
+    subgraph CLOUD["Azure DevOps y SaaS"]
+        REPO["Azure Repos"]
+        PIPE["Azure Pipelines"]
+        ART["Azure Artifacts<br/>app + FortifyPackage"]
+        ENV["Environments<br/>aprobaciones y checks"]
+        LIB["Variable Groups<br/>secretos"]
+        CI["Microsoft-hosted agent<br/>CI"]
+        SNYK["Snyk Open Source<br/>SCA"]
+        DAST["Snyk API & Web<br/>DAST"]
+
+        REPO --> PIPE
+        PIPE --> CI
+        LIB -.-> CI
+        CI -->|"Build, test, package"| ART
+        CI -->|"SCA HTTPS 443"| SNYK
+    end
+
+    subgraph ONPREM["Red corporativa"]
+        FW["Firewall / NAT<br/>salida 443 controlada"]
+
+        subgraph SAST_ZONE["SAST on-prem"]
+            SAST["Self-hosted agent<br/>Stage SAST"]
+            SC["ScanCentral Controller"]
+            SENSOR["ScanCentral Sensors"]
+            SSC["Fortify SSC<br/>Quality Gate"]
+
+            SAST -->|"scancentral start -upload -block"| SC
+            SC --> SENSOR
+            SENSOR -->|"resultados"| SSC
+            SAST -->|"consulta API"| SSC
+        end
+
+        subgraph CD_ZONE["CD on-prem"]
+            CD_TEST["Self-hosted agent<br/>CD Test"]
+            CD_PROD["Self-hosted agent<br/>CD Prod"]
+            IIS_TEST["IIS Test"]
+            IIS_PROD["IIS Prod"]
+
+            CD_TEST -->|"backup + Web Deploy + health check"| IIS_TEST
+            CD_PROD -->|"backup + Web Deploy + health check"| IIS_PROD
+        end
+    end
+
+    ART -->|"descarga de artefactos HTTPS 443"| FW
+    FW --> SAST
+    FW --> CD_TEST
+    FW --> CD_PROD
+    CD_TEST -->|"scan DAST HTTPS 443"| DAST
+    DAST -->|"pruebas contra URL registrada"| IIS_TEST
+    ENV -.->|"aprobación Prod"| CD_PROD
+
+    CI ==>|"CI aprobado"| SAST
+    SAST ==>|"SAST aprobado"| CD_TEST
+    CD_TEST ==>|"Test aprobado"| CD_PROD
+
+    style CLOUD fill:#eef5ff,stroke:#0078d4
+    style ONPREM fill:#f7f7f7,stroke:#555
+    style SAST_ZONE fill:#fff1f1,stroke:#c50f1f
+    style CD_ZONE fill:#eef8f0,stroke:#107c10
+    style FW fill:#fff7df,stroke:#856404
+    style SNYK fill:#4c4a73,color:#fff
+    style DAST fill:#4c4a73,color:#fff
+    style SSC fill:#c50f1f,color:#fff
+    style IIS_TEST fill:#2b88d8,color:#fff
+    style IIS_PROD fill:#ff8c00,color:#fff

@@ -1,0 +1,334 @@
+# =============================================================================
+# TEMPLATE: Steps de CI — Build, Test, SCA & Fortify Package
+# =============================================================================
+# Capa:       Steps (la más baja — se invoca desde stage-ci.yml)
+# Propósito:  Compilar, ejecutar tests, escanear dependencias (Snyk SCA),
+#             empaquetar código para Fortify ScanCentral, y publicar artefactos
+# Tecnologías soportadas: dotnet | nodejs | custom
+# Principio:  "Compila una vez, despliega múltiples veces" (artefacto inmutable)
+#
+# ESTRATEGIA DE SEGURIDAD HÍBRIDA:
+#   ┌──────────────────────────────────────────────────────────────────┐
+#   │  Este template (CI — MS-hosted, CON internet):                  │
+#   │    → Snyk SCA: escaneo de dependencias (NuGet/npm) vía SaaS    │
+#   │    → Fortify ScanCentral package: empaquetado offline del código│
+#   │                                                                  │
+#   │  Stage SAST posterior (Self-hosted, SIN internet):               │
+#   │    → Envía scancentral-pkg.zip al controlador Fortify on-prem  │
+#   │                                                                  │
+#   │  Stage CD posterior (Self-hosted):                               │
+#   │    → Snyk DAST post-deploy contra la URL interna                │
+#   └──────────────────────────────────────────────────────────────────┘
+#
+# REQUISITOS:
+#   - Agente Microsoft-hosted con las herramientas de la tecnología elegida
+#   - Extensión "Snyk Security Scan" instalada en la organización
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan)
+#   - Service Connection tipo Snyk configurado (default: 'sc-snyk')
+#   - Extensión "Fortify" instalada en la organización
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps)
+#
+# ARTEFACTOS PUBLICADOS:
+#   1. {artifactName}-{BuildNumber}-{Branch} → Binario/app compilada (para CD)
+#   2. FortifyPackage-{BuildNumber}          → scancentral-pkg.zip (para SAST)
+#
+# USO:
+#   - template: templates/steps-ci.yml
+#     parameters:
+#       technology: 'dotnet'
+#       projectPath: 'src/MiApp/MiApp.csproj'
+#       artifactName: 'MiApp'
+# =============================================================================
+
+parameters:
+  - name: technology
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - nodejs
+      - custom
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  - name: dotnetVersion
+    type: string
+    default: '8.x'
+
+  - name: projectPath
+    type: string
+    default: ''
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testProjectPath
+    type: string
+    default: ''
+
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+
+  - name: packageManager
+    type: string
+    default: 'npm'
+    values:
+      - npm
+      - yarn
+
+  - name: buildScript
+    type: string
+    default: 'build'
+
+  - name: testScript
+    type: string
+    default: 'test'
+
+  - name: outputFolder
+    type: string
+    default: 'dist'
+
+  - name: enableSnykSCA
+    type: boolean
+    default: true
+
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+
+  - name: snykFailOnIssues
+    type: boolean
+    default: false
+
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
+
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+steps:
+  # ===========================================================================
+  # SECCIÓN 1: SETUP — Instalar herramientas según tecnología
+  # ===========================================================================
+
+  # ─── .NET: Instalar SDK necesario ───────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    - task: UseDotNet@2
+      displayName: '🔧 Instalar .NET SDK ${{ parameters.dotnetVersion }}'
+      inputs:
+        packageType: 'sdk'
+        version: '${{ parameters.dotnetVersion }}'
+
+  # ─── Node.js: Instalar runtime ──────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - task: NodeTool@0
+      displayName: '🔧 Instalar Node.js ${{ parameters.nodeVersion }}'
+      inputs:
+        versionSpec: '${{ parameters.nodeVersion }}'
+
+  # ===========================================================================
+  # SECCIÓN 2: BUILD — Compilar según tecnología
+  # ===========================================================================
+
+  # ─── .NET: Restore → Build ──────────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    - task: DotNetCoreCLI@2
+      displayName: '📦 Restore NuGet Packages'
+      inputs:
+        command: 'restore'
+        projects: '${{ parameters.projectPath }}'
+
+    - task: DotNetCoreCLI@2
+      displayName: '🔨 Build — ${{ parameters.buildConfiguration }}'
+      inputs:
+        command: 'build'
+        projects: '${{ parameters.projectPath }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --no-restore'
+
+  # ─── Node.js: Install → Build ──────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - ${{ if eq(parameters.packageManager, 'npm') }}:
+      - script: npm ci
+        displayName: '📦 npm ci (install dependencies)'
+
+    - ${{ if eq(parameters.packageManager, 'yarn') }}:
+      - script: yarn install --frozen-lockfile
+        displayName: '📦 yarn install (frozen lockfile)'
+
+    - script: ${{ parameters.packageManager }} run ${{ parameters.buildScript }}
+      displayName: '🔨 Build — ${{ parameters.packageManager }} run ${{ parameters.buildScript }}'
+
+  # ===========================================================================
+  # SECCIÓN 3: TEST — Ejecutar tests unitarios
+  # ===========================================================================
+
+  # ─── .NET: dotnet test ──────────────────────────────────────────────────
+  - ${{ if and(eq(parameters.technology, 'dotnet'), eq(parameters.runTests, true)) }}:
+    - task: DotNetCoreCLI@2
+      displayName: '🧪 Test'
+      inputs:
+        command: 'test'
+        projects: '${{ coalesce(parameters.testProjectPath, ''**/*Tests*.csproj'') }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --no-build'
+
+  # ─── Node.js: npm/yarn test ─────────────────────────────────────────────
+  - ${{ if and(eq(parameters.technology, 'nodejs'), eq(parameters.runTests, true)) }}:
+    - script: ${{ parameters.packageManager }} run ${{ parameters.testScript }}
+      displayName: '🧪 Test — ${{ parameters.packageManager }} run ${{ parameters.testScript }}'
+
+  # ===========================================================================
+  # SECCIÓN 4: SECURITY — Snyk SCA (Análisis de Composición de Software)
+  # ===========================================================================
+  # Escanea dependencias de terceros (NuGet, npm) en busca de
+  # vulnerabilidades conocidas usando Snyk Open Source (SaaS).
+  #
+  # REQUISITOS:
+  #   1. Extensión "Snyk Security Scan" instalada desde el Marketplace
+  #      https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan
+  #   2. Service Connection tipo Snyk configurado en Project Settings
+  #   3. El agente MS-hosted tiene salida a internet (snyk.io:443)
+  # NOTA: Si Snyk no está disponible o el Service
+  # Connection falla, el pipeline falla (fail-closed).
+  # El parámetro snykFailOnIssues controla si vulnerabilidades encontradas
+  # causan fallo; pero errores de infraestructura siempre fallan.
+  - ${{ if eq(parameters.enableSnykSCA, true) }}:
+    - task: SnykSecurityScan@1
+      displayName: '🛡️ SCA — Snyk Open Source'
+      inputs:
+        serviceConnectionEndpoint: '${{ parameters.snykServiceConnection }}'
+        testType: 'app'
+        failOnIssues: ${{ parameters.snykFailOnIssues }}
+
+  # ===========================================================================
+  # SECCIÓN 4.5: DEPENDENCY SCAN NATIVO (alternativa/complemento a Snyk)
+  # ===========================================================================
+  # Herramientas nativas del ecosistema como alternativa cuando Snyk no está
+  # disponible, o como segunda capa de verificación.
+  - ${{ if eq(parameters.enableNativeDependencyScan, true) }}:
+    - ${{ if eq(parameters.technology, 'dotnet') }}:
+      - task: DotNetCoreCLI@2
+        displayName: '🔍 Dependency Scan — NuGet Audit'
+        inputs:
+          command: 'custom'
+          custom: 'list'
+          arguments: 'package --vulnerable --include-transitive'
+          projects: '${{ parameters.projectPath }}'
+        continueOnError: true
+
+    - ${{ if eq(parameters.technology, 'nodejs') }}:
+      - script: npm audit --audit-level=high || true
+        displayName: '🔍 Dependency Scan — npm audit'
+        continueOnError: true
+
+  # ===========================================================================
+  # SECCIÓN 5: FORTIFY SCANCENTRAL — Empaquetado Offline
+  # ===========================================================================
+  # Empaqueta el código fuente compilado en un archivo ZIP portátil
+  # (scancentral-pkg.zip) que será enviado al controlador Fortify
+  # ScanCentral on-prem en el stage SAST posterior.
+  #
+  # REQUISITOS:
+  #   1. Extensión "Fortify" instalada desde Azure DevOps Marketplace
+  #      https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps
+  #   2. La extensión provee el cliente ScanCentral en el agente
+  - ${{ if eq(parameters.enableFortifyPackage, true) }}:
+    - ${{ if eq(parameters.technology, 'dotnet') }}:
+      - powershell: |
+          $buildId    = "${{ coalesce(parameters.fortifyBuildId, parameters.artifactName) }}"
+          $outputFile = "$(Build.ArtifactStagingDirectory)\scancentral-pkg.zip"
+
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  FORTIFY SCANCENTRAL — Package (Offline)"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  Build ID:    $buildId"
+          Write-Host "  Build Tool:  msbuild"
+          Write-Host "  Project:     ${{ parameters.projectPath }}"
+          Write-Host "  Output:      $outputFile"
+          Write-Host "═══════════════════════════════════════════════"
+
+          scancentral package `
+              -bt msbuild `
+              -bf "${{ parameters.projectPath }}" `
+              -b $buildId `
+              -o $outputFile
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "##vso[task.logissue type=error]ScanCentral package falló (exit code: $LASTEXITCODE)"
+              exit $LASTEXITCODE
+          }
+
+          $size = (Get-Item $outputFile).Length / 1MB
+          Write-Host "✅ Paquete creado: $outputFile ($([math]::Round($size, 2)) MB)"
+        displayName: '📦 Fortify ScanCentral — Package (.NET)'
+
+    - ${{ if eq(parameters.technology, 'nodejs') }}:
+      - script: |
+          echo "═══════════════════════════════════════════════"
+          echo "  FORTIFY SCANCENTRAL — Package (Offline)"
+          echo "═══════════════════════════════════════════════"
+          echo "  Build Tool:  none"
+          echo "  Output:      $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip"
+          echo "═══════════════════════════════════════════════"
+
+          scancentral package \
+              -bt none \
+              -o "$(Build.ArtifactStagingDirectory)/scancentral-pkg.zip"
+        displayName: '📦 Fortify ScanCentral — Package (Node.js)'
+
+    - publish: $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip
+      artifact: 'FortifyPackage-$(Build.BuildNumber)'
+      displayName: '📄 Publicar Paquete ScanCentral'
+
+  # ===========================================================================
+  # SECCIÓN 6: STEPS ADICIONALES (pre-publish hook)
+  # ===========================================================================
+  - ${{ each step in parameters.prePublishSteps }}:
+    - ${{ step }}
+
+  # ===========================================================================
+  # SECCIÓN 7: PUBLISH — Generar y publicar artefacto inmutable de la app
+  # ===========================================================================
+
+  # ─── .NET: dotnet publish ───────────────────────────────────────────────
+  - ${{ if eq(parameters.technology, 'dotnet') }}:
+    - task: DotNetCoreCLI@2
+      displayName: '📤 Publish App'
+      inputs:
+        command: 'publish'
+        projects: '${{ parameters.projectPath }}'
+        arguments: '--configuration ${{ parameters.buildConfiguration }} --output $(Build.ArtifactStagingDirectory)/app'
+        publishWebProjects: false
+        zipAfterPublish: false
+        modifyOutputPath: false
+
+  # ─── Node.js: copiar carpeta de output ──────────────────────────────────
+  - ${{ if eq(parameters.technology, 'nodejs') }}:
+    - task: CopyFiles@2
+      displayName: '📤 Copiar build output a staging'
+      inputs:
+        SourceFolder: '${{ parameters.outputFolder }}'
+        Contents: '**'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/app'
+
+  # ─── Publicar artefacto versionado de la aplicación ──────────────────────
+  - publish: $(Build.ArtifactStagingDirectory)/app
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: '📦 Publicar Artefacto de Aplicación'

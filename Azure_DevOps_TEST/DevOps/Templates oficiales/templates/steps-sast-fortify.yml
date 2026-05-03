@@ -1,0 +1,299 @@
+# =============================================================================
+# TEMPLATE: Steps SAST — Fortify ScanCentral Upload & Quality Gate
+# =============================================================================
+# Capa:       Steps (la más baja — se invoca desde stage-sast.yml)
+# Propósito:  Enviar paquete ScanCentral al controlador on-prem y evaluar
+#             Quality Gate contra Fortify SSC
+# Agente:     Self-hosted On-Premise (con acceso al controlador Fortify)
+#
+# ESTRATEGIA "EMPAQUETADO OFFLINE":
+#   El código fue empaquetado en el stage CI (agente MS-hosted con internet).
+#   Este stage corre en un agente on-prem SIN internet, pero CON acceso al
+#   controlador ScanCentral y al servidor Fortify SSC.
+#
+# REQUISITOS:
+#   - Extensión "Fortify" instalada en Azure DevOps
+#     (Marketplace: https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps)
+#   - ScanCentral Client instalado en el agente on-prem
+#   - Controlador ScanCentral accesible desde el agente
+#   - Fortify SSC accesible desde el agente (para quality gate)
+#
+# USO:
+#   - template: templates/steps-sast-fortify.yml
+#     parameters:
+#       artifactName: 'MiApp'
+#       fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'
+#       fortifyScanCentralToken: $(FortifyScanCentralToken)
+#       fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'
+#       fortifySSCAuthToken: $(FortifySSCToken)
+#       fortifyAppName: 'MiApp'
+#       fortifyAppVersion: '1.0'
+# =============================================================================
+
+parameters:
+  # ─── Identificación del artefacto ─────────────────────────────
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+    # Debe coincidir con el artifactName usado en CI para localizar
+    # el artefacto scancentral-pkg.zip
+
+  # ─── Fortify ScanCentral Controller ───────────────────────────
+  - name: fortifyScanCentralUrl
+    type: string
+    default: ''
+    # URL del controlador ScanCentral on-prem
+    # Ejemplo: 'https://fortify-sc.empresa.local/scancentral-ctrl'
+
+  - name: fortifyScanCentralToken
+    type: string
+    default: ''
+    # Token de autenticación para el controlador ScanCentral.
+    # Se recomienda pasar como variable secreta: $(FortifyScanCentralToken)
+
+  # ─── Fortify SSC (para Quality Gate) ──────────────────────────
+  - name: fortifySSCUrl
+    type: string
+    default: ''
+    # URL del servidor Fortify SSC
+    # Ejemplo: 'https://fortify-ssc.empresa.local/ssc'
+
+  - name: fortifySSCAuthToken
+    type: string
+    default: ''
+    # Token de autenticación para SSC (tipo CIToken o UnifiedLoginToken).
+    # Se recomienda pasar como variable secreta: $(FortifySSCToken)
+
+  # ─── Aplicación en Fortify SSC ────────────────────────────────
+  - name: fortifyAppName
+    type: string
+    default: ''
+    # Nombre de la aplicación registrada en Fortify SSC
+
+  - name: fortifyAppVersion
+    type: string
+    default: ''
+    # Versión de la aplicación en Fortify SSC
+
+  # ─── Build ID de ScanCentral ──────────────────────────────────
+  - name: fortifyBuildId
+    type: string
+    default: ''
+    # Identificador del build para ScanCentral.
+    # Si vacío, se usa artifactName como fallback.
+
+  # ─── Quality Gate ─────────────────────────────────────────────
+  - name: qualityGateEnabled
+    type: boolean
+    default: true
+    # Si true, consulta Fortify SSC después del scan y falla el
+    # pipeline si se exceden los umbrales configurados.
+
+  - name: qualityGateMaxCritical
+    type: number
+    default: 0
+    # Máximo de vulnerabilidades Critical permitidas (0 = cero tolerancia)
+
+  - name: qualityGateMaxHigh
+    type: number
+    default: 0
+    # Máximo de vulnerabilidades High permitidas (0 = cero tolerancia)
+
+  - name: scanTimeoutMinutes
+    type: number
+    default: 60
+
+steps:
+  # ===========================================================================
+  # PASO 1: Descargar ÚNICAMENTE el artefacto scancentral-pkg.zip
+  # ===========================================================================
+  - download: current
+    artifact: 'FortifyPackage-$(Build.BuildNumber)'
+    displayName: '📥 Descargar Paquete ScanCentral'
+
+  # ===========================================================================
+  # PASO 2: Enviar paquete al controlador ScanCentral
+  # ===========================================================================
+  - powershell: |
+      $scUrl      = "${{ parameters.fortifyScanCentralUrl }}"
+      $appName    = "${{ parameters.fortifyAppName }}"
+      $appVersion = "${{ parameters.fortifyAppVersion }}"
+      $buildId    = "${{ coalesce(parameters.fortifyBuildId, parameters.artifactName) }}"
+      $pkgPath    = "$(Pipeline.Workspace)/FortifyPackage-$(Build.BuildNumber)/scancentral-pkg.zip"
+      $timeout    = ${{ parameters.scanTimeoutMinutes }}
+
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  FORTIFY SCANCENTRAL — Submit Scan"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Controller:   $scUrl"
+      Write-Host "  Application:  $appName"
+      Write-Host "  Version:      $appVersion"
+      Write-Host "  Build ID:     $buildId"
+      Write-Host "  Package:      $pkgPath"
+      Write-Host "  Timeout:      $timeout min"
+      Write-Host "═══════════════════════════════════════════════"
+
+      if (-not (Test-Path $pkgPath)) {
+          Write-Host "##vso[task.logissue type=error]Paquete ScanCentral no encontrado: $pkgPath"
+          exit 1
+      }
+
+      scancentral -url $scUrl start `
+          -upload `
+          -uptoken $env:SC_UPLOAD_TOKEN `
+          -b $buildId `
+          -application $appName `
+          -version $appVersion `
+          -package $pkgPath `
+          -block `
+          -bt none
+
+      $exitCode = $LASTEXITCODE
+      if ($exitCode -ne 0) {
+          Write-Host "##vso[task.logissue type=error]ScanCentral falló con código de salida: $exitCode"
+          exit $exitCode
+      }
+
+      Write-Host ""
+      Write-Host "✅ Scan completado y resultados subidos a Fortify SSC"
+    displayName: '🛡️ Fortify ScanCentral — Submit & Wait'
+    timeoutInMinutes: ${{ parameters.scanTimeoutMinutes }}
+    env:
+      SC_UPLOAD_TOKEN: ${{ parameters.fortifyScanCentralToken }}
+
+  # ===========================================================================
+  # PASO 3: Quality Gate — Evaluar resultados en Fortify SSC
+  # ===========================================================================
+  - ${{ if eq(parameters.qualityGateEnabled, true) }}:
+    - powershell: |
+        $sscUrl      = "${{ parameters.fortifySSCUrl }}"
+        $appName     = "${{ parameters.fortifyAppName }}"
+        $appVersion  = "${{ parameters.fortifyAppVersion }}"
+        $maxCritical = ${{ parameters.qualityGateMaxCritical }}
+        $maxHigh     = ${{ parameters.qualityGateMaxHigh }}
+
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  FORTIFY SSC — Quality Gate"
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  SSC URL:       $sscUrl"
+        Write-Host "  Application:   $appName"
+        Write-Host "  Version:       $appVersion"
+        Write-Host "  Max Critical:  $maxCritical"
+        Write-Host "  Max High:      $maxHigh"
+        Write-Host "═══════════════════════════════════════════════"
+
+        Start-Sleep -Seconds 15
+
+        $headers = @{
+            "Authorization" = "FortifyToken $env:SSC_AUTH_TOKEN"
+            "Accept"        = "application/json"
+        }
+
+        try {
+            $versionsUrl = "$sscUrl/api/v1/projectVersions?q=project.name:$appName+and+name:$appVersion"
+            $response = Invoke-RestMethod -Uri $versionsUrl -Headers $headers -Method Get
+            $versionId = $response.data[0].id
+
+            if (-not $versionId) {
+                Write-Host "##vso[task.logissue type=error]No se encontró la versión '$appVersion' de '$appName' en SSC."
+                Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse sin una versión válida en SSC."
+                Write-Host "Verificar que la aplicación y versión existan en Fortify SSC."
+                exit 1
+            }
+
+            Write-Host "  Version ID:    $versionId"
+        } catch {
+            Write-Host "##vso[task.logissue type=error]Error consultando SSC: $($_.Exception.Message)"
+            Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse — SSC inaccesible."
+            Write-Host "Verificar fortifySSCUrl y token de autenticación."
+            exit 1
+        }
+
+        try {
+            $issuesUrl = "$sscUrl/api/v1/projectVersions/$versionId/issueGroups?groupingtype=FOLDER&filterset=a243b195-0a59-3f8b-1403-d55b7a7d78e6"
+            $issuesResponse = Invoke-RestMethod -Uri $issuesUrl -Headers $headers -Method Get
+
+            $critical = 0
+            $high     = 0
+            $medium   = 0
+            $low      = 0
+
+            foreach ($group in $issuesResponse.data) {
+                switch ($group.id) {
+                    "Critical" { $critical = $group.visibleCount }
+                    "High"     { $high     = $group.visibleCount }
+                    "Medium"   { $medium   = $group.visibleCount }
+                    "Low"      { $low      = $group.visibleCount }
+                }
+            }
+        } catch {
+            Write-Host "##vso[task.logissue type=error]Error obteniendo issues de SSC: $($_.Exception.Message)"
+            Write-Host "##vso[task.logissue type=error]Quality Gate no puede evaluarse — datos de vulnerabilidades no disponibles."
+            exit 1
+        }
+
+        Write-Host ""
+        Write-Host "  ┌─────────────┬──────────┬──────────┐"
+        Write-Host "  │ Severidad   │ Actual   │ Máximo   │"
+        Write-Host "  ├─────────────┼──────────┼──────────┤"
+        Write-Host "  │ Critical    │ $($critical.ToString().PadLeft(8)) │ $($maxCritical.ToString().PadLeft(8)) │"
+        Write-Host "  │ High        │ $($high.ToString().PadLeft(8)) │ $($maxHigh.ToString().PadLeft(8)) │"
+        Write-Host "  │ Medium      │ $($medium.ToString().PadLeft(8)) │      n/a │"
+        Write-Host "  │ Low         │ $($low.ToString().PadLeft(8)) │      n/a │"
+        Write-Host "  └─────────────┴──────────┴──────────┘"
+
+        $failed = $false
+        $reasons = @()
+
+        if ($critical -gt $maxCritical) {
+            $failed = $true
+            $reasons += "Critical: $critical (máximo permitido: $maxCritical)"
+        }
+        if ($high -gt $maxHigh) {
+            $failed = $true
+            $reasons += "High: $high (máximo permitido: $maxHigh)"
+        }
+
+        if ($medium -gt 0) {
+            Write-Host "##vso[task.logissue type=warning]Fortify SSC: $medium vulnerabilidades Medium detectadas."
+        }
+        if ($low -gt 0) {
+            Write-Host "##vso[task.logissue type=warning]Fortify SSC: $low vulnerabilidades Low detectadas."
+        }
+
+        if ($failed) {
+            Write-Host ""
+            Write-Host "##vso[task.logissue type=error]❌ QUALITY GATE FAILED"
+            foreach ($reason in $reasons) {
+                Write-Host "##vso[task.logissue type=error]  → $reason"
+            }
+            Write-Host ""
+            Write-Host "Revisar resultados en: $sscUrl/html/ssc/version/$versionId"
+            exit 1
+        } else {
+            Write-Host ""
+            Write-Host "✅ QUALITY GATE PASSED — dentro de los umbrales permitidos"
+            Write-Host "  Dashboard: $sscUrl/html/ssc/version/$versionId"
+        }
+      displayName: '🚦 Fortify SSC — Quality Gate'
+      env:
+        SSC_AUTH_TOKEN: ${{ parameters.fortifySSCAuthToken }}
+
+  # ===========================================================================
+  # PASO 4: Resumen SAST
+  # ===========================================================================
+  - powershell: |
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  SAST SUMMARY"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Tool:          Fortify ScanCentral"
+      Write-Host "  Controller:    ${{ parameters.fortifyScanCentralUrl }}"
+      Write-Host "  Application:   ${{ parameters.fortifyAppName }}"
+      Write-Host "  Version:       ${{ parameters.fortifyAppVersion }}"
+      Write-Host "  Quality Gate:  ${{ parameters.qualityGateEnabled }}"
+      Write-Host "  Build Number:  $(Build.BuildNumber)"
+      Write-Host "  Branch:        $(Build.SourceBranchName)"
+      Write-Host "  Timestamp:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+      Write-Host "═══════════════════════════════════════════════"
+    displayName: '📋 SAST Summary'
+    condition: succeededOrFailed()

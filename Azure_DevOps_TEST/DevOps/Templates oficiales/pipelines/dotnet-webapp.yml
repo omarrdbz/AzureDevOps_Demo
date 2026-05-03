@@ -1,0 +1,78 @@
+# Pipeline ejemplo: aplicación web .NET
+
+name: '$(Date:yyyyMMdd).$(Rev:r)'
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+    exclude:
+      - '**/*.md'
+      - '**/.gitignore'
+
+pr: none
+
+stages:
+  - template: ../templates/stage-ci.yml
+    parameters:
+      technology: 'dotnet'
+      vmImage: 'windows-latest'
+      dotnetVersion: '8.x'
+      projectPath: 'src/MiApp/MiApp.csproj'
+      artifactName: 'MiApp'
+      buildConfiguration: 'Release'
+      runTests: true
+      enableSnykSCA: true
+      snykServiceConnection: 'sc-snyk'
+      snykFailOnIssues: true
+      enableNativeDependencyScan: true
+      enableFortifyPackage: true
+      fortifyBuildId: 'MiApp'
+
+  - template: ../templates/stage-sast.yml
+    parameters:
+      pool: 'Pool-Test'
+      variableGroup: 'vg-fortify'
+      dependsOn: 'CI'
+      artifactName: 'MiApp'
+      fortifyScanCentralUrl: 'https://fortify-sc.empresa.local/scancentral-ctrl'
+      fortifyScanCentralToken: $(FortifyScanCentralToken)
+      fortifySSCUrl: 'https://fortify-ssc.empresa.local/ssc'
+      fortifySSCAuthToken: $(FortifySSCToken)
+      fortifyAppName: 'MiApp'
+      fortifyAppVersion: '1.0'
+      qualityGateEnabled: true
+      qualityGateMaxCritical: 0
+      qualityGateMaxHigh: 0
+
+  - template: ../templates/stage-cd.yml
+    parameters:
+      environment: 'Test'
+      pool: 'Pool-Test'
+      variableGroup: 'vg-miapp-test'
+      artifactName: 'MiApp'
+      deployPath: 'C:\inetpub\wwwroot\MiApp'
+      backupPath: 'C:\deploy-backups\MiApp'
+      healthCheckEndpoint: '/health'
+      dependsOn: 'SAST'
+      enableSnykApiWebDAST: true
+      snykApiWebTargetId: '<TARGET_ID>'
+      snykApiWebScanProfile: 'normal'
+      snykApiWebSeverityThreshold: 'HIGH'
+      snykApiWebFailOnIssues: true
+
+  - template: ../templates/stage-cd.yml
+    parameters:
+      environment: 'Prod'
+      pool: 'Pool-Prod'
+      variableGroup: 'vg-miapp-prod'
+      artifactName: 'MiApp'
+      deployPath: 'C:\inetpub\wwwroot\MiApp'
+      backupPath: 'C:\deploy-backups\MiApp'
+      healthCheckEndpoint: '/health'
+      dependsOn: 'CD_Test'
+      condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
+      enableSnykApiWebDAST: false

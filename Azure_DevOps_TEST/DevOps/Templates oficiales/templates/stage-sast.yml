@@ -1,0 +1,92 @@
+parameters:
+  - name: pool
+    type: string
+
+  - name: variableGroup
+    type: string
+    default: 'vg-fortify'
+
+  - name: dependsOn
+    type: string
+    default: 'CI'
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: fortifyScanCentralUrl
+    type: string
+    default: ''
+
+  - name: fortifyScanCentralToken
+    type: string
+    default: ''
+
+  - name: fortifySSCUrl
+    type: string
+    default: ''
+
+  - name: fortifySSCAuthToken
+    type: string
+    default: ''
+
+  - name: fortifyAppName
+    type: string
+    default: ''
+
+  - name: fortifyAppVersion
+    type: string
+    default: ''
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  - name: qualityGateEnabled
+    type: boolean
+    default: true
+
+  - name: qualityGateMaxCritical
+    type: number
+    default: 0
+
+  - name: qualityGateMaxHigh
+    type: number
+    default: 0
+
+  - name: scanTimeoutMinutes
+    type: number
+    default: 60
+
+stages:
+  - stage: SAST
+    displayName: 'SAST — Fortify ScanCentral'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    pool:
+      name: ${{ parameters.pool }}
+    variables:
+      - group: ${{ parameters.variableGroup }}
+    jobs:
+      - job: FortifySAST
+        displayName: 'Fortify ScanCentral — Upload & Quality Gate'
+        timeoutInMinutes: ${{ parameters.scanTimeoutMinutes }}
+        steps:
+          - template: steps-sast-fortify.yml
+            parameters:
+              artifactName: ${{ parameters.artifactName }}
+              fortifyScanCentralUrl: ${{ parameters.fortifyScanCentralUrl }}
+              fortifyScanCentralToken: ${{ parameters.fortifyScanCentralToken }}
+              fortifySSCUrl: ${{ parameters.fortifySSCUrl }}
+              fortifySSCAuthToken: ${{ parameters.fortifySSCAuthToken }}
+              fortifyAppName: ${{ parameters.fortifyAppName }}
+              fortifyAppVersion: ${{ parameters.fortifyAppVersion }}
+              fortifyBuildId: ${{ parameters.fortifyBuildId }}
+              qualityGateEnabled: ${{ parameters.qualityGateEnabled }}
+              qualityGateMaxCritical: ${{ parameters.qualityGateMaxCritical }}
+              qualityGateMaxHigh: ${{ parameters.qualityGateMaxHigh }}
+              scanTimeoutMinutes: ${{ parameters.scanTimeoutMinutes }}

@@ -1,0 +1,432 @@
+# =============================================================================
+# TEMPLATE: Steps de CD — Deploy a IIS con Web Deploy + Snyk DAST
+# =============================================================================
+# Capa:       Steps (la más baja — se invoca desde stage-cd.yml)
+# Propósito:  Backup, deploy via msdeploy.exe, health check, auto-rollback,
+#             y escaneo dinámico de seguridad (DAST) con Snyk post-deploy
+# Método:     Web Deploy (WMSVC) — sin privilegios de admin local
+# Principio:  Artefacto inmutable construido en CI se despliega sin recompilar
+#
+# REQUISITOS EN EL SERVIDOR:
+#   - Web Deploy 3.6+ instalado (msdeploy.exe)
+#   - Web Management Service (WMSVC) habilitado y corriendo (puerto 8172)
+#   - Delegación de Web Deploy configurada para la cuenta de servicio
+#   - Sitio IIS creado previamente (via script bootstrap)
+#   - Ver: DevOps/guia-web-deploy-iis.md
+#
+# REQUISITOS DE RED (agente on-prem):
+#   ✅ Acceso a servidores IIS internos (Web Deploy)
+#   ✅ Acceso a api.probely.com:443 (si Snyk API & Web DAST habilitado)
+#
+# VARIABLES REQUERIDAS EN VARIABLE GROUP:
+#   - WebsiteName          (nombre del sitio en IIS, ej: "MiApp-Test")
+#   - SiteUrl              (URL del sitio, ej: "https://miapp-test.empresa.local")
+#   - WebDeployUser        (cuenta de servicio para Web Deploy)
+#   - WebDeployPassword    🔒 (secreto)
+#   - (Opcionales) Variables de app: ConnectionStrings, API keys, etc.
+#
+# USO:
+#   - template: templates/steps-cd-iis.yml
+#     parameters:
+#       artifactName: 'MiApp'
+#       backupPath: 'C:\deploy-backups\MiApp'
+# =============================================================================
+
+parameters:
+  - name: environment
+    type: string
+    default: ''
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\WebApp'
+
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\WebApp'
+
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  - name: healthCheckDelaySeconds
+    type: number
+    default: 10
+
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  - name: maxBackups
+    type: number
+    default: 5
+
+  - name: enableSnykApiWebDAST
+    type: boolean
+    default: false
+
+  - name: snykApiWebTargetId
+    type: string
+    default: ''
+
+  - name: snykApiWebScanProfile
+    type: string
+    default: 'normal'
+    values:
+      - lightning
+      - normal
+      - safe
+
+  - name: snykApiWebTimeoutMinutes
+    type: number
+    default: 60
+
+  - name: snykApiWebSeverityThreshold
+    type: string
+    default: 'HIGH'
+    values:
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+
+  - name: snykApiWebFailOnIssues
+    type: boolean
+    default: true
+
+steps:
+  # ===========================================================================
+  # PASO 1: Descargar artefacto inmutable construido en CI
+  # ===========================================================================
+  - download: current
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: '📥 Descargar Artefacto'
+
+  # ===========================================================================
+  # PASO 2: Backup pre-deploy (OBLIGATORIO)
+  # ===========================================================================
+  - powershell: |
+      $deployPath = "${{ parameters.deployPath }}"
+      $backupPath = "${{ parameters.backupPath }}"
+      $timestamp  = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupDir  = Join-Path $backupPath "backup-$timestamp"
+
+      # Verificar si hay algo que respaldar
+      if (Test-Path $deployPath) {
+          $itemCount = (Get-ChildItem $deployPath -Recurse -File -ErrorAction SilentlyContinue).Count
+          if ($itemCount -gt 0) {
+              New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+              Copy-Item -Path "$deployPath\*" -Destination $backupDir -Recurse -Force
+              Write-Host "✅ Backup creado: $backupDir ($itemCount archivos)"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]$backupDir"
+          } else {
+              Write-Host "⚠️ Carpeta de deploy vacía — omitiendo backup (primer deploy)"
+              Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+          }
+      } else {
+          Write-Host "⚠️ Carpeta de deploy no existe — primer deploy"
+          Write-Host "##vso[task.setvariable variable=LastBackupPath]"
+      }
+    displayName: '💾 Backup Pre-Deploy'
+
+  # ===========================================================================
+  # PASO 3: Limpiar backups antiguos (retención rotativa)
+  # ===========================================================================
+  # Mantiene solo los últimos N backups (parámetro maxBackups).
+  # Los más antiguos se eliminan automáticamente.
+  - powershell: |
+      $backupPath = "${{ parameters.backupPath }}"
+      $maxBackups = ${{ parameters.maxBackups }}
+
+      if (Test-Path $backupPath) {
+          $backups  = Get-ChildItem $backupPath -Directory | Sort-Object CreationTime -Descending
+          $toDelete = $backups | Select-Object -Skip $maxBackups
+          if ($toDelete) {
+              $toDelete | ForEach-Object {
+                  Write-Host "  🗑️ Eliminando: $($_.Name)"
+                  Remove-Item $_.FullName -Recurse -Force
+              }
+              Write-Host "✅ Backups retenidos: $maxBackups"
+          } else {
+              Write-Host "✅ Dentro del límite de retención ($($backups.Count)/$maxBackups)"
+          }
+      } else {
+          New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+          Write-Host "📁 Directorio de backups creado: $backupPath"
+      }
+    displayName: '🧹 Limpiar Backups Antiguos'
+    continueOnError: true
+
+  # ===========================================================================
+  # PASO 4: Verificar que el sitio IIS existe
+  # ===========================================================================
+  - powershell: |
+      $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
+      $site   = "$(WebsiteName)"
+
+      $exists = & $appcmd list site /name:"$site" 2>$null
+      if ($exists) {
+          Write-Host "✅ Sitio '$site' encontrado en IIS"
+      } else {
+          Write-Host "##vso[task.logissue type=error]Sitio '$site' no existe en IIS."
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  ACCIÓN REQUERIDA"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  Ejecutar el script bootstrap como Administrador en el servidor:"
+          Write-Host "    .\bootstrap\setup-iis-server.ps1 -ConfigFile .\server-config.json"
+          Write-Host ""
+          Write-Host "  Referencia: DevOps/guia-web-deploy-iis.md — Sección 8"
+          Write-Host "═══════════════════════════════════════════════"
+          exit 1
+      }
+    displayName: '🔍 Verificar Sitio IIS'
+
+  # ===========================================================================
+  # PASO 5: Deploy via Web Deploy (msdeploy.exe + WMSVC)
+  # ===========================================================================
+  # Usa Web Deploy para sincronizar el artefacto al sitio IIS.
+  # - Sync diferencial: solo transfiere archivos que cambiaron
+  # - App Offline automático: detiene peticiones durante el deploy
+  # - Sin admin local: opera vía delegación WMSVC
+  # - Credenciales: se inyectan via env vars desde el Variable Group
+  - powershell: |
+      $msdeployExe  = "${{ parameters.msdeployPath }}"
+      $site         = "$(WebsiteName)"
+      $artifactPath = "$(Pipeline.Workspace)/${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)"
+
+      if (-not (Test-Path $msdeployExe)) {
+          throw "msdeploy.exe no encontrado en: $msdeployExe. Instalar Web Deploy 3.6+ (ver guia-web-deploy-iis.md Sección 2)"
+      }
+
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  DEPLOY CON WEB DEPLOY (MSDeploy)"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Sitio:       $site"
+      Write-Host "  Artefacto:   $artifactPath"
+      Write-Host "  Modo:        WMSVC (sin admin local)"
+      Write-Host "  Entorno:     ${{ parameters.environment }}"
+      Write-Host "═══════════════════════════════════════════════"
+
+      $msdeployArgs = @(
+          "-verb:sync",
+          "-source:contentPath=`"$artifactPath`"",
+          "-dest:contentPath=`"$site`",computerName=`"https://localhost:8172/msdeploy.axd?site=$site`",userName=`"$env:WEBDEPLOY_USER`",password=`"$env:WEBDEPLOY_PASSWORD`",authType=`"Basic`"",
+          "-enableRule:AppOffline",
+          "-allowUntrusted",
+          "-retryAttempts:2",
+          "-retryInterval:3000"
+      )
+
+      & $msdeployExe $msdeployArgs
+
+      if ($LASTEXITCODE -ne 0) {
+          throw "Web Deploy falló con código de salida: $LASTEXITCODE"
+      }
+
+      Write-Host ""
+      Write-Host "✅ Deploy completado exitosamente via Web Deploy"
+    displayName: '🚀 Deploy — Web Deploy (msdeploy.exe)'
+    env:
+      WEBDEPLOY_USER: $(WebDeployUser)
+      WEBDEPLOY_PASSWORD: $(WebDeployPassword)
+
+  # ===========================================================================
+  # PASO 6: Health Check + Auto-Rollback
+  # ===========================================================================
+  # Verifica que la aplicación responda correctamente después del deploy.
+  # Si falla después de N reintentos y hay un backup disponible,
+  # ejecuta rollback automático restaurando el backup más reciente.
+  - powershell: |
+      $siteUrl        = "$(SiteUrl)"
+      $endpoint       = "${{ parameters.healthCheckEndpoint }}"
+      $fullUrl        = "${siteUrl}${endpoint}"
+      $maxRetries     = ${{ parameters.healthCheckRetries }}
+      $retryDelay     = ${{ parameters.healthCheckDelaySeconds }}
+      $enableRollback = [System.Convert]::ToBoolean("${{ parameters.enableAutoRollback }}")
+      $lastBackup     = "$(LastBackupPath)"
+      $deployPath     = "${{ parameters.deployPath }}"
+      $websiteName    = "$(WebsiteName)"
+
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  HEALTH CHECK"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  URL:      $fullUrl"
+      Write-Host "  Intentos: $maxRetries"
+      Write-Host "  Rollback: $(if ($enableRollback) { 'Habilitado' } else { 'Deshabilitado' })"
+      Write-Host "═══════════════════════════════════════════════"
+
+      Start-Sleep -Seconds 5
+
+      $success = $false
+      for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+              Write-Host "`nIntento $i de $maxRetries..."
+              $response = Invoke-WebRequest -Uri $fullUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Health check exitoso (HTTP $($response.StatusCode))"
+                  $success = $true
+                  break
+              } else {
+                  Write-Host "⚠️ Respuesta inesperada: HTTP $($response.StatusCode)"
+              }
+          } catch {
+              Write-Host "❌ Intento $i falló: $($_.Exception.Message)"
+              if ($i -lt $maxRetries) {
+                  Write-Host "   Esperando $retryDelay segundos..."
+                  Start-Sleep -Seconds $retryDelay
+              }
+          }
+      }
+
+      if (-not $success) {
+          if ($enableRollback -and $lastBackup -and (Test-Path $lastBackup)) {
+              Write-Host ""
+              Write-Host "═══════════════════════════════════════════════"
+              Write-Host "  🔄 ROLLBACK AUTOMÁTICO"
+              Write-Host "═══════════════════════════════════════════════"
+              Write-Host "  Restaurando desde: $lastBackup"
+
+              $appcmd = "$env:WinDir\System32\inetsrv\appcmd.exe"
+              & $appcmd stop site /site.name:"$websiteName" 2>$null
+              Start-Sleep -Seconds 3
+
+              $resolvedPath = (Resolve-Path $deployPath -ErrorAction SilentlyContinue).Path
+              $safePrefixes = @("C:\inetpub\", "D:\inetpub\", "C:\deploy\", "D:\deploy\", "C:\sites\", "D:\sites\")
+              $isSafe = $false
+              foreach ($prefix in $safePrefixes) {
+                  if ($resolvedPath -and $resolvedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                      $isSafe = $true
+                      break
+                  }
+              }
+              if (-not $isSafe) {
+                  Write-Host "##vso[task.logissue type=error]Rollback abortado: deployPath '$deployPath' no está bajo un directorio seguro permitido."
+                  Write-Host "Directorios permitidos: $($safePrefixes -join ', ')"
+                  throw "Rollback abortado por ruta no confiable: $deployPath"
+              }
+
+              Remove-Item "$deployPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+              Copy-Item -Path "$lastBackup\*" -Destination $deployPath -Recurse -Force
+
+              & $appcmd start site /site.name:"$websiteName" 2>$null
+              Start-Sleep -Seconds 5
+
+              throw "❌ Deploy falló — rollback ejecutado desde: $lastBackup"
+          } else {
+              throw "❌ Deploy falló — health check no pasó después de $maxRetries intentos (sin backup para rollback)"
+          }
+      }
+    displayName: '🏥 Health Check + Auto-Rollback'
+
+  # ===========================================================================
+  # PASO 7: DAST — Snyk API & Web (Probely)
+  # ===========================================================================
+  - ${{ if eq(parameters.enableSnykApiWebDAST, true) }}:
+    - powershell: |
+        $targetId          = "${{ parameters.snykApiWebTargetId }}"
+        $scanProfile       = "${{ parameters.snykApiWebScanProfile }}"
+        $timeoutMinutes    = ${{ parameters.snykApiWebTimeoutMinutes }}
+        $severityThreshold = "${{ parameters.snykApiWebSeverityThreshold }}"
+        $failOnIssues      = [System.Convert]::ToBoolean("${{ parameters.snykApiWebFailOnIssues }}")
+
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  DAST — Snyk API & Web (Probely)"
+        Write-Host "═══════════════════════════════════════════════"
+        Write-Host "  Target ID:           $targetId"
+        Write-Host "  Scan Profile:        $scanProfile"
+        Write-Host "  Timeout:             $timeoutMinutes min"
+        Write-Host "  Severity Threshold:  $severityThreshold"
+        Write-Host "  Fail on Issues:      $failOnIssues"
+        Write-Host "═══════════════════════════════════════════════"
+
+        if ([string]::IsNullOrWhiteSpace($targetId)) {
+            Write-Host "##vso[task.logissue type=error]snykApiWebTargetId es requerido para DAST."
+            Write-Host "Obtener el Target ID desde: Snyk API & Web > Targets > seleccionar target > copiar ID."
+            exit 1
+        }
+
+        if ([string]::IsNullOrWhiteSpace($env:PROBELY_API_KEY)) {
+            Write-Host "##vso[task.logissue type=error]Variable ProbelyApiKey no está configurada."
+            Write-Host "Agregar ProbelyApiKey como variable secreta en el Variable Group del entorno."
+            exit 1
+        }
+
+        $probelyCmd = Get-Command probely -ErrorAction SilentlyContinue
+        if (-not $probelyCmd) {
+            Write-Host "##vso[task.logissue type=error]Probely CLI no está instalada en el agente."
+            Write-Host "Instalar en la imagen/base del agente: pip install probely"
+            exit 1
+        } else {
+            Write-Host "Probely CLI: $($probelyCmd.Source)"
+        }
+
+        Write-Host "`nIniciando DAST scan en modo bloqueante..."
+
+        $scanConfigPath = Join-Path "$(Agent.TempDirectory)" "snyk-api-web-scan.yml"
+        Set-Content -Path $scanConfigPath -Value "scan_profile: $scanProfile" -Encoding UTF8
+        Write-Host "  Config file:         $scanConfigPath"
+
+        $probelyArgs = @(
+            "targets", "follow-scan", $targetId,
+            "--timeout", $timeoutMinutes.ToString(),
+            "--severity-threshold", $severityThreshold,
+            "--continue-scan",
+            "-f", $scanConfigPath,
+            "-o", "JSON"
+        )
+
+        probely @probelyArgs 2>&1 | Tee-Object -Variable probelyOutput
+        $exitCode = $LASTEXITCODE
+
+        Write-Host "`n═══════════════════════════════════════════════"
+
+        if ($exitCode -ne 0) {
+            if ($failOnIssues) {
+                Write-Host "##vso[task.logissue type=error]❌ DAST encontró vulnerabilidades >= $severityThreshold."
+                Write-Host "##vso[task.logissue type=error]Revisar resultados en Snyk API & Web > Target: $targetId"
+                exit 1
+            } else {
+                Write-Host "##vso[task.logissue type=warning]DAST reportó hallazgos (snykApiWebFailOnIssues=false — pipeline continúa)."
+            }
+        } else {
+            Write-Host "✅ DAST completado — sin vulnerabilidades >= $severityThreshold"
+        }
+      displayName: '🔍 DAST — Snyk API & Web (Probely)'
+      timeoutInMinutes: ${{ add(parameters.snykApiWebTimeoutMinutes, 5) }}
+      env:
+        PROBELY_API_KEY: $(ProbelyApiKey)
+
+  # ===========================================================================
+  # PASO 8: Resumen del Deploy
+  # ===========================================================================
+  - powershell: |
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  DEPLOY SUMMARY"
+      Write-Host "═══════════════════════════════════════════════"
+      Write-Host "  Environment:   ${{ parameters.environment }}"
+      Write-Host "  Website:       $(WebsiteName)"
+      Write-Host "  Deploy Path:   ${{ parameters.deployPath }}"
+      Write-Host "  Site URL:      $(SiteUrl)"
+      Write-Host "  Artifact:      ${{ parameters.artifactName }}"
+      Write-Host "  Build Number:  $(Build.BuildNumber)"
+      Write-Host "  Branch:        $(Build.SourceBranchName)"
+      Write-Host "  Deployed By:   $(Build.RequestedFor)"
+      Write-Host "  Snyk DAST:     ${{ parameters.enableSnykApiWebDAST }}"
+      Write-Host "  Timestamp:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+      Write-Host "═══════════════════════════════════════════════"
+    displayName: '📋 Deploy Summary'
+    condition: succeededOrFailed()

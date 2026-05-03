@@ -1,0 +1,113 @@
+parameters:
+  - name: environment
+    type: string
+
+  - name: pool
+    type: string
+
+  - name: variableGroup
+    type: string
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: deployPath
+    type: string
+    default: 'C:\inetpub\wwwroot\WebApp'
+
+  - name: backupPath
+    type: string
+    default: 'C:\deploy-backups\WebApp'
+
+  - name: msdeployPath
+    type: string
+    default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  - name: healthCheckEndpoint
+    type: string
+    default: '/health'
+
+  - name: healthCheckRetries
+    type: number
+    default: 3
+
+  - name: healthCheckDelaySeconds
+    type: number
+    default: 10
+
+  - name: enableAutoRollback
+    type: boolean
+    default: true
+
+  - name: maxBackups
+    type: number
+    default: 5
+
+  - name: enableSnykApiWebDAST
+    type: boolean
+    default: false
+
+  - name: snykApiWebTargetId
+    type: string
+    default: ''
+
+  - name: snykApiWebScanProfile
+    type: string
+    default: 'normal'
+
+  - name: snykApiWebTimeoutMinutes
+    type: number
+    default: 60
+
+  - name: snykApiWebSeverityThreshold
+    type: string
+    default: 'HIGH'
+
+  - name: snykApiWebFailOnIssues
+    type: boolean
+    default: true
+
+  - name: dependsOn
+    type: string
+    default: 'CI'
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+stages:
+  - stage: CD_${{ parameters.environment }}
+    displayName: 'CD — Deploy to ${{ parameters.environment }}'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    variables:
+      - group: ${{ parameters.variableGroup }}
+    pool:
+      name: ${{ parameters.pool }}
+    jobs:
+      - deployment: Deploy
+        displayName: 'Deploy to ${{ parameters.environment }}'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: steps-cd-iis.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    artifactName: ${{ parameters.artifactName }}
+                    deployPath: ${{ parameters.deployPath }}
+                    backupPath: ${{ parameters.backupPath }}
+                    msdeployPath: ${{ parameters.msdeployPath }}
+                    healthCheckEndpoint: ${{ parameters.healthCheckEndpoint }}
+                    healthCheckRetries: ${{ parameters.healthCheckRetries }}
+                    healthCheckDelaySeconds: ${{ parameters.healthCheckDelaySeconds }}
+                    enableAutoRollback: ${{ parameters.enableAutoRollback }}
+                    maxBackups: ${{ parameters.maxBackups }}
+                    enableSnykApiWebDAST: ${{ parameters.enableSnykApiWebDAST }}
+                    snykApiWebTargetId: ${{ parameters.snykApiWebTargetId }}
+                    snykApiWebScanProfile: ${{ parameters.snykApiWebScanProfile }}
+                    snykApiWebTimeoutMinutes: ${{ parameters.snykApiWebTimeoutMinutes }}
+                    snykApiWebSeverityThreshold: ${{ parameters.snykApiWebSeverityThreshold }}
+                    snykApiWebFailOnIssues: ${{ parameters.snykApiWebFailOnIssues }}

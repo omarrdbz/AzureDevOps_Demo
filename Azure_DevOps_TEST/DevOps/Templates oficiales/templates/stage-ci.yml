@@ -1,0 +1,115 @@
+parameters:
+  - name: technology
+    type: string
+    default: 'dotnet'
+    values:
+      - dotnet
+      - nodejs
+      - custom
+
+  - name: vmImage
+    type: string
+    default: 'windows-latest'
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  - name: dotnetVersion
+    type: string
+    default: '8.x'
+
+  - name: projectPath
+    type: string
+    default: ''
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testProjectPath
+    type: string
+    default: ''
+
+  - name: nodeVersion
+    type: string
+    default: '20.x'
+
+  - name: packageManager
+    type: string
+    default: 'npm'
+
+  - name: buildScript
+    type: string
+    default: 'build'
+
+  - name: testScript
+    type: string
+    default: 'test'
+
+  - name: outputFolder
+    type: string
+    default: 'dist'
+
+  - name: enableSnykSCA
+    type: boolean
+    default: true
+
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+
+  - name: snykFailOnIssues
+    type: boolean
+    default: false
+
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
+
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+stages:
+  - stage: CI
+    displayName: 'CI — Build, Test, SCA & Fortify Package'
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    jobs:
+      - job: Build
+        displayName: 'Build, Scan & Publish Artifacts'
+        steps:
+          - template: steps-ci.yml
+            parameters:
+              technology: ${{ parameters.technology }}
+              artifactName: ${{ parameters.artifactName }}
+              buildConfiguration: ${{ parameters.buildConfiguration }}
+              dotnetVersion: ${{ parameters.dotnetVersion }}
+              projectPath: ${{ parameters.projectPath }}
+              runTests: ${{ parameters.runTests }}
+              testProjectPath: ${{ parameters.testProjectPath }}
+              nodeVersion: ${{ parameters.nodeVersion }}
+              packageManager: ${{ parameters.packageManager }}
+              buildScript: ${{ parameters.buildScript }}
+              testScript: ${{ parameters.testScript }}
+              outputFolder: ${{ parameters.outputFolder }}
+              enableSnykSCA: ${{ parameters.enableSnykSCA }}
+              snykServiceConnection: ${{ parameters.snykServiceConnection }}
+              snykFailOnIssues: ${{ parameters.snykFailOnIssues }}
+              enableNativeDependencyScan: ${{ parameters.enableNativeDependencyScan }}
+              enableFortifyPackage: ${{ parameters.enableFortifyPackage }}
+              fortifyBuildId: ${{ parameters.fortifyBuildId }}
+              prePublishSteps: ${{ parameters.prePublishSteps }}

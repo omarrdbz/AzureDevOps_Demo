@@ -1,0 +1,69 @@
+sequenceDiagram
+    autonumber
+
+    participant Dev as Developer
+    participant Repo as Azure Repos
+    participant Pipe as Azure Pipelines
+    participant CI as Microsoft-hosted CI
+    participant Art as Azure Artifacts
+    participant Snyk as Snyk Open Source
+    participant SAST as Self-hosted SAST
+    participant SC as ScanCentral Controller
+    participant SSC as Fortify SSC
+    participant CDTest as Self-hosted CD Test
+    participant IISTest as IIS Test
+    participant DAST as Snyk API & Web
+    participant Approver as Environment Approval
+    participant CDProd as Self-hosted CD Prod
+    participant IISProd as IIS Prod
+
+    Dev->>Repo: Push a main
+    Repo->>Pipe: Dispara pipeline
+
+    Pipe->>CI: Stage CI
+    CI->>Repo: Checkout
+    CI->>CI: Setup SDK/runtime
+    CI->>CI: Restore, build y test
+    CI->>Snyk: SCA de dependencias
+    Snyk-->>CI: Resultado SCA
+    CI->>CI: NuGet audit / npm audit
+    CI->>CI: ScanCentral package
+    CI->>CI: Publish aplicación
+    CI->>Art: Publica app-{build}-{branch}
+    CI->>Art: Publica FortifyPackage-{build}
+
+    Pipe->>SAST: Stage SAST
+    SAST->>Art: Descarga FortifyPackage-{build}
+    SAST->>SC: Envia scancentral-pkg.zip (-upload -block)
+    SC->>SSC: Publica resultados SAST
+    SC-->>SAST: Scan completado
+    SAST->>SSC: Consulta conteo por severidad
+    SSC-->>SAST: Critical, High, Medium, Low
+
+    alt Critical/High excede umbral
+        SAST-->>Pipe: Falla quality gate
+    else Quality gate aprobado
+        Pipe->>CDTest: Stage CD Test
+        CDTest->>Art: Descarga app-{build}-{branch}
+        CDTest->>CDTest: Backup y rotación
+        CDTest->>IISTest: Valida sitio IIS
+        CDTest->>IISTest: Deploy con Web Deploy
+        CDTest->>IISTest: Health check
+
+        alt Health check falla
+            CDTest->>CDTest: Rollback desde backup
+            CDTest-->>Pipe: Falla deploy
+        else Health check OK
+            CDTest->>DAST: Ejecuta scan DAST
+            DAST->>IISTest: Pruebas dinámicas
+            DAST-->>CDTest: Resultado por severidad
+        end
+
+        Pipe->>Approver: Solicita aprobación Prod
+        Approver-->>Pipe: Aprobado
+        Pipe->>CDProd: Stage CD Prod
+        CDProd->>Art: Descarga app-{build}-{branch}
+        CDProd->>CDProd: Backup y rotación
+        CDProd->>IISProd: Deploy con Web Deploy
+        CDProd->>IISProd: Health check
+    end

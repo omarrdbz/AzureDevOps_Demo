@@ -1,0 +1,192 @@
+# Templates oficiales de Azure DevOps
+
+Templates reutilizables para CI/CD corporativo con controles de seguridad SCA, SAST y DAST. El diseño compila una vez, publica artefactos inmutables y despliega el mismo paquete en cada ambiente.
+
+## Estructura
+
+```text
+Templates oficiales/
+├── README.md
+├── diagrams/
+│   ├── Arquitectura.mmd
+│   ├── Conexión a Snyk.mmd
+│   └── Diagrama de Secuencia.mmd
+├── pipelines/
+│   ├── dotnet-webapp.yml
+│   └── nodejs-webapp.yml
+└── templates/
+    ├── stage-ci.yml
+    ├── stage-sast.yml
+    ├── stage-cd.yml
+    ├── steps-ci.yml
+    ├── steps-sast-fortify.yml
+    └── steps-cd-iis.yml
+```
+
+## Arquitectura
+
+El pipeline separa responsabilidades por conectividad:
+
+| Etapa | Agente | Función | Conectividad |
+|---|---|---|---|
+| CI | Microsoft-hosted | Build, test, Snyk SCA, paquete Fortify y publicación de artefactos | Internet |
+| SAST | Self-hosted on-prem | Envío a ScanCentral y quality gate en Fortify SSC | Red interna Fortify |
+| CD Test | Self-hosted on-prem | Backup, Web Deploy, health check, rollback y DAST | IIS interno + `api.probely.com:443` |
+| CD Prod | Self-hosted on-prem | Backup, Web Deploy, health check y rollback | IIS interno |
+
+Diagramas:
+
+- [Arquitectura](diagrams/Arquitectura.mmd)
+- [Diagrama de Secuencia](diagrams/Diagrama%20de%20Secuencia.mmd)
+- [Conexión a Snyk](diagrams/Conexi%C3%B3n%20a%20Snyk.mmd)
+
+## Flujo
+
+1. CI restaura dependencias, compila, ejecuta tests y escanea dependencias con Snyk.
+2. CI genera dos artefactos: la aplicación publicada y `scancentral-pkg.zip`.
+3. SAST descarga solo el paquete Fortify, lo envía a ScanCentral y evalúa Critical/High en SSC.
+4. CD Test descarga la aplicación, crea backup, despliega con Web Deploy, ejecuta health check y hace rollback automático si falla.
+5. CD Test ejecuta DAST con Snyk API & Web cuando está habilitado.
+6. CD Prod despliega el mismo artefacto aprobado, condicionado a rama `main` y aprobaciones del Environment.
+
+## Templates
+
+### `stage-ci.yml`
+
+Wrapper de stage para `steps-ci.yml`.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `technology` | `dotnet`, `nodejs` o `custom` |
+| `vmImage` | Imagen Microsoft-hosted |
+| `artifactName` | Nombre base del artefacto de aplicación |
+| `enableSnykSCA` | Habilita Snyk Open Source |
+| `enableNativeDependencyScan` | Habilita NuGet Audit o npm audit |
+| `enableFortifyPackage` | Publica `FortifyPackage-{BuildNumber}` |
+
+### `stage-sast.yml`
+
+Wrapper de stage para `steps-sast-fortify.yml`.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `pool` | Agent Pool self-hosted |
+| `variableGroup` | Variable Group con tokens Fortify |
+| `fortifyScanCentralUrl` | URL del controlador ScanCentral |
+| `fortifySSCUrl` | URL de Fortify SSC |
+| `fortifyAppName` | Aplicación registrada en SSC |
+| `fortifyAppVersion` | Versión registrada en SSC |
+| `qualityGateMaxCritical` | Máximo de Critical permitidas |
+| `qualityGateMaxHigh` | Máximo de High permitidas |
+| `scanTimeoutMinutes` | Timeout del scan bloqueante |
+
+### `stage-cd.yml`
+
+Wrapper de deployment stage para `steps-cd-iis.yml`.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `environment` | Environment de Azure DevOps |
+| `pool` | Agent Pool self-hosted |
+| `variableGroup` | Variables y secretos del ambiente |
+| `deployPath` | Ruta física del sitio IIS |
+| `backupPath` | Ruta de backups rotativos |
+| `healthCheckEndpoint` | Endpoint usado para validar el despliegue |
+| `enableAutoRollback` | Restaura backup si el health check falla |
+| `enableSnykApiWebDAST` | Ejecuta DAST post-deploy |
+
+## Variables
+
+Variable Group por ambiente:
+
+| Variable | Descripción |
+|---|---|
+| `WebsiteName` | Nombre del sitio en IIS |
+| `SiteUrl` | URL base del sitio |
+| `WebDeployUser` | Cuenta de servicio Web Deploy |
+| `WebDeployPassword` | Secreto de la cuenta de servicio |
+| `ProbelyApiKey` | API key de Snyk API & Web, solo si DAST está habilitado |
+
+Variable Group Fortify:
+
+| Variable | Descripción |
+|---|---|
+| `FortifyScanCentralToken` | Token para ScanCentral |
+| `FortifySSCToken` | Token para Fortify SSC |
+
+## Requisitos
+
+CI:
+
+- Extensión Snyk Security Scan instalada.
+- Extensión Fortify instalada.
+- Service Connection Snyk, por defecto `sc-snyk`.
+
+SAST:
+
+- Agente self-hosted con ScanCentral Client.
+- Acceso al controlador ScanCentral.
+- Acceso a Fortify SSC.
+- Aplicación y versión creadas en Fortify SSC.
+
+CD:
+
+- Agente self-hosted con acceso al servidor IIS.
+- Web Deploy 3.6+ y WMSVC habilitado.
+- Sitio IIS creado antes del primer despliegue.
+- Permisos de Web Deploy delegados a la cuenta de servicio.
+- Probely CLI instalado en el agente cuando DAST esté habilitado.
+
+## Seguridad y resiliencia
+
+| Control | Implementación |
+|---|---|
+| Artefacto inmutable | CI publica una sola vez; CD descarga el mismo artefacto |
+| Secretos fuera del código | Variable Groups y variables de entorno |
+| Menor privilegio | Web Deploy por WMSVC delegado |
+| SCA | Snyk Open Source y escaneo nativo opcional |
+| SAST | Fortify ScanCentral con quality gate |
+| DAST | Snyk API & Web en Test |
+| Rollback | Backup pre-deploy y restauración automática |
+| Reproducibilidad | Herramientas esperadas en el agente; no se instalan dinámicamente en runtime |
+| Prod controlado | Environment approvals y condición de rama `main` |
+
+## Uso
+
+1. Copiar uno de los ejemplos en `pipelines/`.
+2. Ajustar nombres de app, rutas, pools, variable groups y URLs Fortify.
+3. Crear los Variable Groups y Environments.
+4. Configurar aprobaciones en `Pipelines > Environments`.
+5. Crear el pipeline desde el YAML.
+
+Ejemplos:
+
+- [.NET](pipelines/dotnet-webapp.yml)
+- [Node.js](pipelines/nodejs-webapp.yml)
+
+## Troubleshooting
+
+| Problema | Revisión |
+|---|---|
+| `msdeploy.exe no encontrado` | Instalar Web Deploy 3.6+ en el agente/servidor |
+| `401 Unauthorized` en deploy | Revisar delegación WMSVC y credenciales |
+| `Sitio no existe en IIS` | Crear el sitio antes del primer despliegue |
+| Health check timeout | Validar `SiteUrl`, endpoint y tiempo de arranque |
+| Snyk SCA falla | Revisar extensión y Service Connection |
+| ScanCentral falla | Validar cliente, controlador, token y red interna |
+| Quality gate falla | Remediar Critical/High o ajustar umbrales aprobados |
+| DAST falla | Validar `ProbelyApiKey`, Target ID, CLI y salida a `api.probely.com:443` |
+| Artefacto no encontrado | Confirmar que `artifactName` coincida entre CI, SAST y CD |
+
+## Referencias
+
+- [Guía de Web Deploy + IIS](../guia-web-deploy-iis.md)
+- [Azure DevOps YAML Schema](https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema)
+- [Snyk Security Scan Extension](https://marketplace.visualstudio.com/items?itemName=SnykSec.snyk-security-scan)
+- [Fortify Azure DevOps Extension](https://marketplace.visualstudio.com/items?itemName=fortabortext.OpenTextFortifyAzureDevOps)

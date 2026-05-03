@@ -1,0 +1,21 @@
+{
+    "serviceAccount": "svc_ado_deploy",
+    "sites": [
+        {
+            "name": "WeatherApp-Test",
+            "appPool": "WeatherApp-Test-Pool",
+            "physicalPath": "C:\\inetpub\\wwwroot\\WeatherApp",
+            "port": 80,
+            "hostHeader": "weatherapp-test.empresa.local",
+            "managedRuntime": ""
+        },
+        {
+            "name": "WeatherApp-Prod",
+            "appPool": "WeatherApp-Prod-Pool",
+            "physicalPath": "C:\\inetpub\\wwwroot\\WeatherApp",
+            "port": 80,
+            "hostHeader": "weatherapp.empresa.local",
+            "managedRuntime": ""
+        }
+    ]
+}

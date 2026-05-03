@@ -1,0 +1,20 @@
+graph LR
+    subgraph SNYK["Snyk API & Web"]
+        API["api.probely.com<br/>Orquestación DAST + resultados"]
+    end
+
+    subgraph ONPREM["Red corporativa"]
+        AGENT["Agente self-hosted CD<br/>Probely CLI"]
+        APP["Aplicación desplegada<br/>IIS Test/QA"]
+    end
+
+    AGENT -->|"1. Inicia y sigue el scan<br/>HTTPS 443"| API
+    API -->|"2. Ejecuta pruebas DAST<br/>sobre la URL registrada"| APP
+    APP -->|"3. Respuestas HTTP"| API
+    API -->|"4. Resultado + umbral de severidad"| AGENT
+
+    style SNYK fill:#eef2ff,stroke:#4c4a73
+    style ONPREM fill:#eef8f0,stroke:#107c10
+    style API fill:#4c4a73,color:#fff
+    style AGENT fill:#107c10,color:#fff
+    style APP fill:#2b88d8,color:#fff
