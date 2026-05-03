@@ -3,7 +3,7 @@
 # =============================================================================
 # Capa:       Steps (la más baja — se invoca desde stage-cd.yml)
 # Propósito:  Backup, deploy via msdeploy.exe, health check, auto-rollback,
-#             y escaneo dinámico de seguridad (DAST) con Snyk post-deploy
+#             y escaneo dinámico de seguridad (DAST) desde el agente on-prem
 # Método:     Web Deploy (WMSVC) — sin privilegios de admin local
 # Principio:  Artefacto inmutable construido en CI se despliega sin recompilar
 #
@@ -16,7 +16,8 @@
 #
 # REQUISITOS DE RED (agente on-prem):
 #   ✅ Acceso a servidores IIS internos (Web Deploy)
-#   ✅ Acceso a api.probely.com:443 (si Snyk API & Web DAST habilitado)
+#   ✅ Acceso interno a la aplicación desplegada
+#   ✅ Salida a api.probely.com:443 (si Snyk API & Web DAST habilitado)
 #
 # VARIABLES REQUERIDAS EN VARIABLE GROUP:
 #   - WebsiteName          (nombre del sitio en IIS, ej: "MiApp-Test")
@@ -344,7 +345,7 @@ steps:
         $failOnIssues      = [System.Convert]::ToBoolean("${{ parameters.snykApiWebFailOnIssues }}")
 
         Write-Host "═══════════════════════════════════════════════"
-        Write-Host "  DAST — Snyk API & Web (Probely)"
+        Write-Host "  DAST — Self-hosted scanning agent + Snyk API & Web"
         Write-Host "═══════════════════════════════════════════════"
         Write-Host "  Target ID:           $targetId"
         Write-Host "  Scan Profile:        $scanProfile"
@@ -374,7 +375,7 @@ steps:
             Write-Host "Probely CLI: $($probelyCmd.Source)"
         }
 
-        Write-Host "`nIniciando DAST scan en modo bloqueante..."
+        Write-Host "`nIniciando DAST desde el agente self-hosted..."
 
         $scanConfigPath = Join-Path "$(Agent.TempDirectory)" "snyk-api-web-scan.yml"
         Set-Content -Path $scanConfigPath -Value "scan_profile: $scanProfile" -Encoding UTF8
@@ -405,7 +406,7 @@ steps:
         } else {
             Write-Host "✅ DAST completado — sin vulnerabilidades >= $severityThreshold"
         }
-      displayName: '🔍 DAST — Snyk API & Web (Probely)'
+      displayName: '🔍 DAST — Self-hosted scanning agent'
       timeoutInMinutes: ${{ add(parameters.snykApiWebTimeoutMinutes, 5) }}
       env:
         PROBELY_API_KEY: $(ProbelyApiKey)

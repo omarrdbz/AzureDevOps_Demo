@@ -31,7 +31,7 @@ El pipeline separa responsabilidades por conectividad:
 |---|---|---|---|
 | CI | Microsoft-hosted | Build, test, Snyk SCA, paquete Fortify y publicación de artefactos | Internet |
 | SAST | Self-hosted on-prem | Envío a ScanCentral y quality gate en Fortify SSC | Red interna Fortify |
-| CD Test | Self-hosted on-prem | Backup, Web Deploy, health check, rollback y DAST | IIS interno + `api.probely.com:443` |
+| CD Test | Self-hosted on-prem | Backup, Web Deploy, health check, rollback y DAST | IIS interno + salida a `api.probely.com:443` |
 | CD Prod | Self-hosted on-prem | Backup, Web Deploy, health check y rollback | IIS interno |
 
 Diagramas:
@@ -46,7 +46,7 @@ Diagramas:
 2. CI genera dos artefactos: la aplicación publicada y `scancentral-pkg.zip`.
 3. SAST descarga solo el paquete Fortify, lo envía a ScanCentral y evalúa Critical/High en SSC.
 4. CD Test descarga la aplicación, crea backup, despliega con Web Deploy, ejecuta health check y hace rollback automático si falla.
-5. CD Test ejecuta DAST con Snyk API & Web cuando está habilitado.
+5. CD Test actúa como scanning agent: inicia el scan en Snyk API & Web, ejecuta las pruebas DAST contra QA por red interna y reporta resultados.
 6. CD Prod despliega el mismo artefacto aprobado, condicionado a rama `main` y aprobaciones del Environment.
 
 ## Templates
@@ -99,7 +99,7 @@ Parámetros principales:
 | `backupPath` | Ruta de backups rotativos |
 | `healthCheckEndpoint` | Endpoint usado para validar el despliegue |
 | `enableAutoRollback` | Restaura backup si el health check falla |
-| `enableSnykApiWebDAST` | Ejecuta DAST post-deploy |
+| `enableSnykApiWebDAST` | Ejecuta DAST post-deploy desde el agente self-hosted |
 
 ## Variables
 
@@ -142,6 +142,8 @@ CD:
 - Sitio IIS creado antes del primer despliegue.
 - Permisos de Web Deploy delegados a la cuenta de servicio.
 - Probely CLI instalado en el agente cuando DAST esté habilitado.
+- Conectividad desde el agente hacia la URL interna de QA/Test.
+- Salida HTTPS 443 desde el agente hacia `api.probely.com`.
 
 ## Seguridad y resiliencia
 
@@ -152,10 +154,22 @@ CD:
 | Menor privilegio | Web Deploy por WMSVC delegado |
 | SCA | Snyk Open Source y escaneo nativo opcional |
 | SAST | Fortify ScanCentral con quality gate |
-| DAST | Snyk API & Web en Test |
+| DAST | Snyk API & Web orquestado desde el agente self-hosted en Test |
 | Rollback | Backup pre-deploy y restauración automática |
 | Reproducibilidad | Herramientas esperadas en el agente; no se instalan dinámicamente en runtime |
 | Prod controlado | Environment approvals y condición de rama `main` |
+
+## DAST en aplicaciones internas
+
+Los servidores QA/Test no requieren exposición a internet. El agente self-hosted de CD actúa como scanning agent: mantiene la comunicación saliente con Snyk API & Web y ejecuta las pruebas contra la aplicación usando la red interna.
+
+Requisitos de red:
+
+| Origen | Destino | Uso |
+|---|---|---|
+| Self-hosted CD Test | `api.probely.com:443` | Orquestación, estado y resultados |
+| Self-hosted CD Test | `SiteUrl` interno | Crawling, fuzzing y validaciones DAST |
+| Internet | QA/Test | No requerido |
 
 ## Uso
 
@@ -181,7 +195,7 @@ Ejemplos:
 | Snyk SCA falla | Revisar extensión y Service Connection |
 | ScanCentral falla | Validar cliente, controlador, token y red interna |
 | Quality gate falla | Remediar Critical/High o ajustar umbrales aprobados |
-| DAST falla | Validar `ProbelyApiKey`, Target ID, CLI y salida a `api.probely.com:443` |
+| DAST falla | Validar `ProbelyApiKey`, Target ID, CLI, salida a `api.probely.com:443` y acceso interno del agente a `SiteUrl` |
 | Artefacto no encontrado | Confirmar que `artifactName` coincida entre CI, SAST y CD |
 
 ## Referencias

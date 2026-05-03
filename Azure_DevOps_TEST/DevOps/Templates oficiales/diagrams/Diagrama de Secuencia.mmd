@@ -10,7 +10,7 @@ sequenceDiagram
     participant SAST as Self-hosted SAST
     participant SC as ScanCentral Controller
     participant SSC as Fortify SSC
-    participant CDTest as Self-hosted CD Test
+    participant CDTest as Self-hosted CD Test / Scanning Agent
     participant IISTest as IIS Test
     participant DAST as Snyk API & Web
     participant Approver as Environment Approval
@@ -54,8 +54,10 @@ sequenceDiagram
             CDTest->>CDTest: Rollback desde backup
             CDTest-->>Pipe: Falla deploy
         else Health check OK
-            CDTest->>DAST: Ejecuta scan DAST
-            DAST->>IISTest: Pruebas dinámicas
+            CDTest->>DAST: Inicia scan y obtiene configuración
+            CDTest->>IISTest: Ejecuta pruebas DAST por red interna
+            IISTest-->>CDTest: Respuestas HTTP
+            CDTest->>DAST: Reporta hallazgos y estado
             DAST-->>CDTest: Resultado por severidad
         end
 

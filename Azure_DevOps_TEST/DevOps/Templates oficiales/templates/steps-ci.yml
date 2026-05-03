@@ -17,7 +17,7 @@
 #   │    → Envía scancentral-pkg.zip al controlador Fortify on-prem  │
 #   │                                                                  │
 #   │  Stage CD posterior (Self-hosted):                               │
-#   │    → Snyk DAST post-deploy contra la URL interna                │
+#   │    → DAST post-deploy desde el agente contra la URL interna     │
 #   └──────────────────────────────────────────────────────────────────┘
 #
 # REQUISITOS:

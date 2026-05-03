@@ -7,7 +7,7 @@ graph TD
         LIB["Variable Groups<br/>secretos"]
         CI["Microsoft-hosted agent<br/>CI"]
         SNYK["Snyk Open Source<br/>SCA"]
-        DAST["Snyk API & Web<br/>DAST"]
+        DAST["Snyk API & Web<br/>orquestación DAST"]
 
         REPO --> PIPE
         PIPE --> CI
@@ -32,12 +32,13 @@ graph TD
         end
 
         subgraph CD_ZONE["CD on-prem"]
-            CD_TEST["Self-hosted agent<br/>CD Test"]
+            CD_TEST["Self-hosted agent<br/>CD Test + scanning agent"]
             CD_PROD["Self-hosted agent<br/>CD Prod"]
             IIS_TEST["IIS Test"]
             IIS_PROD["IIS Prod"]
 
             CD_TEST -->|"backup + Web Deploy + health check"| IIS_TEST
+            CD_TEST -->|"pruebas DAST por red interna"| IIS_TEST
             CD_PROD -->|"backup + Web Deploy + health check"| IIS_PROD
         end
     end
@@ -46,8 +47,7 @@ graph TD
     FW --> SAST
     FW --> CD_TEST
     FW --> CD_PROD
-    CD_TEST -->|"scan DAST HTTPS 443"| DAST
-    DAST -->|"pruebas contra URL registrada"| IIS_TEST
+    CD_TEST -->|"inicia scan y reporta resultados HTTPS 443"| DAST
     ENV -.->|"aprobación Prod"| CD_PROD
 
     CI ==>|"CI aprobado"| SAST
