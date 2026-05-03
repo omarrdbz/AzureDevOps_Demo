@@ -1,0 +1,40 @@
+parameters:
+  - name: environment
+    type: string
+    default: 'UAT'
+
+  - name: pool
+    type: string
+
+  - name: dependsOn
+    type: string
+    default: 'Security_Review'
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+  - name: applicationName
+    type: string
+    default: 'WebApp'
+
+stages:
+  - stage: UAT
+    displayName: 'UAT — Business Acceptance'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    pool:
+      name: ${{ parameters.pool }}
+    jobs:
+      - deployment: BusinessAcceptance
+        displayName: 'User acceptance validation'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - powershell: |
+                    Write-Host "Application:        ${{ parameters.applicationName }}"
+                    Write-Host "Required evidence:  business validation completed in QA/Test"
+                    Write-Host "Required decision:  approve or reject production promotion"
+                  displayName: 'Record UAT context'

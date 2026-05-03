@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arquitectura interactiva de pipelines</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #607086;
+      --line: #d7dfeb;
+      --cloud: #eaf4ff;
+      --onprem: #eef9f3;
+      --ci: #2563eb;
+      --sast: #c2410c;
+      --test: #15803d;
+      --appsec: #7c2d12;
+      --uat: #0f766e;
+      --prod: #b45309;
+      --snyk: #5145cd;
+      --fortify: #be123c;
+      --shadow: 0 18px 45px rgba(15, 23, 42, .12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(37, 99, 235, .16), transparent 24rem),
+        radial-gradient(circle at 82% 16%, rgba(15, 118, 110, .16), transparent 26rem),
+        linear-gradient(180deg, #f8fbff 0%, #eef4f8 100%);
+    }
+
+    main {
+      width: min(1500px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 34px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2.1rem, 4vw, 4.4rem);
+      line-height: .98;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      max-width: 920px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .85);
+      box-shadow: 0 10px 30px rgba(15, 23, 42, .08);
+    }
+
+    button {
+      min-height: 38px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: #f2f6fb;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform .18s ease, background .18s ease, border-color .18s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    .primary { width: 122px; background: #1f2937; color: white; }
+    .icon { width: 42px; background: white; border-color: var(--line); }
+    .speed { width: 64px; background: white; border-color: var(--line); }
+
+    .shell {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 16px;
+    }
+
+    .canvas {
+      position: relative;
+      min-height: 760px;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, .4);
+      border-radius: 8px;
+      background:
+        linear-gradient(90deg, rgba(37, 99, 235, .06) 0 49.8%, rgba(21, 128, 61, .07) 50.2% 100%),
+        rgba(255, 255, 255, .78);
+      box-shadow: var(--shadow);
+    }
+
+    .zone {
+      position: absolute;
+      top: 18px;
+      bottom: 18px;
+      border: 1px dashed rgba(100, 116, 139, .34);
+      border-radius: 8px;
+      pointer-events: none;
+    }
+
+    .cloud { left: 18px; width: calc(49% - 22px); background: rgba(234, 244, 255, .62); }
+    .onprem { right: 18px; width: calc(51% - 22px); background: rgba(238, 249, 243, .62); }
+
+    .zone-label {
+      position: absolute;
+      top: 12px;
+      left: 14px;
+      color: #334155;
+      font-size: .78rem;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .node {
+      position: absolute;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      align-items: center;
+      width: 225px;
+      min-height: 82px;
+      padding: 13px;
+      border: 1px solid rgba(148, 163, 184, .38);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .94);
+      box-shadow: 0 10px 28px rgba(15, 23, 42, .1);
+      cursor: pointer;
+      transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+    }
+
+    .node:hover,
+    .node.active {
+      transform: translateY(-3px);
+      border-color: currentColor;
+      box-shadow: 0 16px 34px rgba(15, 23, 42, .17);
+    }
+
+    .node.dim { opacity: .42; }
+
+    .glyph {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+      background: currentColor;
+      color: white;
+      font-weight: 900;
+    }
+
+    .node h2 {
+      margin: 0 0 5px;
+      font-size: .98rem;
+      line-height: 1.1;
+    }
+
+    .node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: .76rem;
+      line-height: 1.35;
+    }
+
+    .repo { left: 4%; top: 88px; color: #0f766e; }
+    .ci { left: 22%; top: 88px; color: var(--ci); }
+    .snyk { left: 4%; top: 236px; color: var(--snyk); }
+    .artifacts { left: 22%; top: 236px; color: #0369a1; }
+    .sast { left: 53%; top: 82px; color: var(--sast); }
+    .fortify { right: 4%; top: 82px; color: var(--fortify); }
+    .cdtest { left: 53%; top: 236px; color: var(--test); }
+    .qa { right: 4%; top: 236px; color: #2563eb; }
+    .snykapi { left: 53%; top: 390px; color: var(--snyk); }
+    .appsec { right: 4%; top: 390px; color: var(--appsec); }
+    .uat { left: 53%; top: 544px; color: var(--uat); }
+    .prod { right: 4%; top: 544px; color: var(--prod); }
+
+    svg.flow {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    .flow path {
+      fill: none;
+      stroke: rgba(71, 85, 105, .38);
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-dasharray: 7 9;
+    }
+
+    .flow path.active {
+      stroke: currentColor;
+      stroke-width: 4;
+      stroke-dasharray: 10 8;
+      animation: dash 1s linear infinite;
+    }
+
+    @keyframes dash { to { stroke-dashoffset: -36; } }
+
+    .packet {
+      position: absolute;
+      z-index: 3;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #111827;
+      box-shadow: 0 0 0 8px rgba(17, 24, 39, .08);
+      opacity: 0;
+      transform: translate(-50%, -50%);
+    }
+
+    .packet.run { animation: move 2.15s ease-in-out forwards; }
+
+    @keyframes move {
+      0% { left: var(--x1); top: var(--y1); opacity: 0; }
+      12% { opacity: 1; }
+      100% { left: var(--x2); top: var(--y2); opacity: 0; }
+    }
+
+    .status-strip {
+      position: absolute;
+      left: 28px;
+      right: 28px;
+      bottom: 24px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      z-index: 4;
+    }
+
+    .stage-pill {
+      min-height: 58px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .92);
+    }
+
+    .stage-pill strong { display: block; margin-bottom: 4px; font-size: .82rem; }
+    .stage-pill span { color: var(--muted); font-size: .74rem; }
+    .stage-pill.done { border-color: rgba(21, 128, 61, .4); background: rgba(240, 253, 244, .95); }
+
+    aside { display: grid; grid-template-rows: auto auto 1fr; gap: 16px; }
+
+    .panel {
+      border: 1px solid rgba(148, 163, 184, .4);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .9);
+      box-shadow: var(--shadow);
+    }
+
+    .panel h2 { margin: 0; padding: 16px 16px 0; font-size: 1rem; }
+    .detail { padding: 14px 16px 16px; color: var(--muted); line-height: 1.5; font-size: .92rem; }
+
+    .toggles, .checks { display: grid; gap: 10px; padding: 14px 16px 16px; }
+    label.toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .9rem; cursor: pointer; }
+
+    input[type="checkbox"] {
+      width: 42px;
+      height: 24px;
+      appearance: none;
+      border-radius: 999px;
+      background: #cbd5e1;
+      position: relative;
+      outline: none;
+      transition: background .2s ease;
+    }
+
+    input[type="checkbox"]::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: white;
+      transition: left .2s ease;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, .28);
+    }
+
+    input[type="checkbox"]:checked { background: #16a34a; }
+    input[type="checkbox"]:checked::after { left: 21px; }
+
+    .check {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 10px;
+      align-items: start;
+      color: var(--muted);
+      font-size: .86rem;
+      line-height: 1.35;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      margin-top: 4px;
+      border-radius: 50%;
+      background: #16a34a;
+      box-shadow: 0 0 0 5px rgba(22, 163, 74, .12);
+    }
+
+    .log {
+      min-height: 230px;
+      max-height: 330px;
+      padding: 14px 16px 16px;
+      overflow: auto;
+      color: #dbeafe;
+      background: #111827;
+      border-radius: 0 0 8px 8px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: .78rem;
+      line-height: 1.55;
+    }
+
+    .log .now { color: #86efac; }
+
+    @media (max-width: 1120px) {
+      header, .shell { grid-template-columns: 1fr; }
+      .controls { width: max-content; }
+      .canvas { min-height: 920px; }
+      .status-strip { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    @media (max-width: 760px) {
+      main { width: min(100vw - 20px, 680px); padding-top: 18px; }
+      .controls { width: 100%; justify-content: space-between; }
+      .canvas { min-height: 1280px; }
+      .zone.cloud, .zone.onprem { left: 10px; right: 10px; width: auto; }
+      .zone.cloud { top: 10px; bottom: 720px; }
+      .zone.onprem { top: 560px; bottom: 10px; }
+      .node { left: 50% !important; right: auto !important; width: min(310px, calc(100% - 40px)); transform: translateX(-50%); }
+      .node:hover, .node.active { transform: translateX(-50%) translateY(-3px); }
+      .repo { top: 70px; } .ci { top: 170px; } .snyk { top: 270px; } .artifacts { top: 370px; }
+      .sast { top: 590px; } .fortify { top: 690px; } .cdtest { top: 790px; } .qa { top: 890px; }
+      .snykapi { top: 990px; } .appsec { top: 1090px; } .uat { top: 1190px; } .prod { top: 1190px; }
+      .flow { display: none; }
+      .status-strip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Pipeline vivo</h1>
+        <p class="subtitle">Arquitectura CI/CD con SCA, SAST, despliegue IIS, DAST desde el agente self-hosted, revisión AppSec, UAT y promoción controlada a producción.</p>
+      </div>
+      <div class="controls" aria-label="Controles de animación">
+        <button class="primary" id="play" type="button" title="Reproducir flujo"><span id="playIcon">▶</span> <span id="playText">Reproducir</span></button>
+        <button class="icon" id="step" type="button" title="Avanzar un paso">›</button>
+        <button class="icon" id="reset" type="button" title="Reiniciar">↺</button>
+        <button class="speed" id="speed" type="button" title="Cambiar velocidad">1x</button>
+      </div>
+    </header>
+
+    <section class="shell">
+      <div class="canvas" id="canvas" aria-label="Arquitectura animada de pipelines">
+        <div class="zone cloud"><span class="zone-label">Azure DevOps + SaaS</span></div>
+        <div class="zone onprem"><span class="zone-label">Red corporativa on-prem</span></div>
+
+        <svg class="flow" viewBox="0 0 1000 760" preserveAspectRatio="none" aria-hidden="true">
+          <path id="edge-repo-ci" d="M160 128 C220 128 235 128 285 128" style="color: var(--ci)"></path>
+          <path id="edge-ci-snyk" d="M285 162 C215 192 180 214 160 248" style="color: var(--snyk)"></path>
+          <path id="edge-ci-artifacts" d="M342 164 C342 192 342 214 342 242" style="color: #0369a1"></path>
+          <path id="edge-artifacts-sast" d="M448 278 C505 220 520 164 558 124" style="color: var(--sast)"></path>
+          <path id="edge-sast-fortify" d="M660 124 C725 124 748 124 800 124" style="color: var(--fortify)"></path>
+          <path id="edge-artifacts-cdtest" d="M448 278 C505 278 525 278 558 278" style="color: var(--test)"></path>
+          <path id="edge-cdtest-qa" d="M660 278 C725 278 748 278 800 278" style="color: #2563eb"></path>
+          <path id="edge-cdtest-snykapi" d="M610 318 C610 350 610 372 610 404" style="color: var(--snyk)"></path>
+          <path id="edge-snykapi-appsec" d="M660 430 C725 430 748 430 800 430" style="color: var(--appsec)"></path>
+          <path id="edge-appsec-uat" d="M800 474 C735 520 690 548 658 584" style="color: var(--uat)"></path>
+          <path id="edge-uat-prod" d="M660 584 C725 584 748 584 800 584" style="color: var(--prod)"></path>
+        </svg>
+
+        <article class="node repo" data-id="repo" tabindex="0"><div class="glyph">Git</div><div><h2>Azure Repos</h2><p>Push a main dispara el pipeline.</p></div></article>
+        <article class="node ci" data-id="ci" tabindex="0"><div class="glyph">CI</div><div><h2>CI</h2><p>Build, test, Snyk SCA y paquete Fortify.</p></div></article>
+        <article class="node snyk" data-id="snyk" tabindex="0"><div class="glyph">SCA</div><div><h2>Snyk SCA</h2><p>Escaneo de dependencias.</p></div></article>
+        <article class="node artifacts" data-id="artifacts" tabindex="0"><div class="glyph">Pkg</div><div><h2>Artefactos</h2><p>App inmutable y FortifyPackage.</p></div></article>
+        <article class="node sast" data-id="sast" tabindex="0"><div class="glyph">SAST</div><div><h2>SAST</h2><p>Agente on-prem envía a ScanCentral.</p></div></article>
+        <article class="node fortify" data-id="fortify" tabindex="0"><div class="glyph">SSC</div><div><h2>Fortify SSC</h2><p>Quality gate técnico.</p></div></article>
+        <article class="node cdtest" data-id="cdtest" tabindex="0"><div class="glyph">QA</div><div><h2>CD Test</h2><p>Deploy, health check, rollback y scanning agent.</p></div></article>
+        <article class="node qa" data-id="qa" tabindex="0"><div class="glyph">IIS</div><div><h2>IIS QA/Test</h2><p>Servidor interno, no expuesto a internet.</p></div></article>
+        <article class="node snykapi" data-id="snykapi" tabindex="0"><div class="glyph">DAST</div><div><h2>Snyk API & Web</h2><p>Orquesta DAST y recibe resultados.</p></div></article>
+        <article class="node appsec" data-id="appsec" tabindex="0"><div class="glyph">Risk</div><div><h2>Security Review</h2><p>AppSec revisa reportes y seguimiento.</p></div></article>
+        <article class="node uat" data-id="uat" tabindex="0"><div class="glyph">UAT</div><div><h2>UAT</h2><p>Usuarios validan aceptación funcional.</p></div></article>
+        <article class="node prod" data-id="prod" tabindex="0"><div class="glyph">Prod</div><div><h2>CD Prod</h2><p>Deploy aprobado desde main.</p></div></article>
+
+        <div class="packet" id="packet"></div>
+
+        <div class="status-strip" aria-label="Estado de stages">
+          <div class="stage-pill" data-stage="CI"><strong>CI</strong><span>Pendiente</span></div>
+          <div class="stage-pill" data-stage="SAST"><strong>SAST</strong><span>Pendiente</span></div>
+          <div class="stage-pill" data-stage="CD Test"><strong>CD Test</strong><span>Pendiente</span></div>
+          <div class="stage-pill" data-stage="Security Review"><strong>AppSec</strong><span>Pendiente</span></div>
+          <div class="stage-pill" data-stage="UAT"><strong>UAT</strong><span>Pendiente</span></div>
+          <div class="stage-pill" data-stage="CD Prod"><strong>Prod</strong><span>Pendiente</span></div>
+        </div>
+      </div>
+
+      <aside>
+        <section class="panel">
+          <h2 id="detailTitle">Selecciona un nodo</h2>
+          <div class="detail" id="detailText">Reproduce el flujo o selecciona una pieza de la arquitectura para ver su responsabilidad, aprobadores y límites de red.</div>
+        </section>
+
+        <section class="panel">
+          <h2>Controles</h2>
+          <div class="toggles">
+            <label class="toggle">Snyk SCA <input id="toggle-sca" type="checkbox" checked></label>
+            <label class="toggle">Fortify SAST <input id="toggle-sast" type="checkbox" checked></label>
+            <label class="toggle">DAST on-prem <input id="toggle-dast" type="checkbox" checked></label>
+            <label class="toggle">Security Review <input id="toggle-appsec" type="checkbox" checked></label>
+            <label class="toggle">UAT <input id="toggle-uat" type="checkbox" checked></label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Garantías</h2>
+          <div class="checks">
+            <div class="check"><span class="dot"></span><span>El artefacto se compila una vez y se promueve sin recompilar.</span></div>
+            <div class="check"><span class="dot"></span><span>QA/Test no requiere entrada desde internet para DAST.</span></div>
+            <div class="check"><span class="dot"></span><span>AppSec decide aprobar, bloquear o documentar aceptación de riesgo.</span></div>
+            <div class="check"><span class="dot"></span><span>UAT valida negocio antes de la aprobación final de producción.</span></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Bitácora</h2>
+          <div class="log" id="log" aria-live="polite"></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const steps = [
+      { id: "repo", edge: "edge-repo-ci", stage: "CI", text: "Push a main recibido. Azure Pipelines toma control.", from: [16, 17], to: [31, 17] },
+      { id: "ci", edge: "edge-ci-snyk", stage: "CI", text: "CI ejecuta restore, build, test y Snyk SCA.", from: [34, 17], to: [15, 33], guard: "sca" },
+      { id: "artifacts", edge: "edge-ci-artifacts", stage: "CI", text: "Se publican app y FortifyPackage como artefactos inmutables.", from: [34, 20], to: [34, 36] },
+      { id: "sast", edge: "edge-artifacts-sast", stage: "SAST", text: "SAST descarga FortifyPackage y lo envía on-prem.", from: [43, 37], to: [57, 16], guard: "sast" },
+      { id: "fortify", edge: "edge-sast-fortify", stage: "SAST", text: "Fortify SSC evalúa el quality gate Critical/High.", from: [66, 16], to: [82, 16], guard: "sast" },
+      { id: "cdtest", edge: "edge-artifacts-cdtest", stage: "CD Test", text: "CD Test descarga el mismo artefacto y despliega en QA.", from: [43, 37], to: [57, 37] },
+      { id: "qa", edge: "edge-cdtest-qa", stage: "CD Test", text: "Web Deploy publica en IIS QA/Test y valida health check.", from: [66, 37], to: [82, 37] },
+      { id: "snykapi", edge: "edge-cdtest-snykapi", stage: "CD Test", text: "El agente self-hosted inicia DAST con salida 443 a Snyk API & Web.", from: [61, 41], to: [61, 55], guard: "dast" },
+      { id: "appsec", edge: "edge-snykapi-appsec", stage: "Security Review", text: "AppSec revisa SCA, SAST y DAST; asigna seguimiento a desarrollo.", from: [66, 56], to: [82, 56], guard: "appsec" },
+      { id: "uat", edge: "edge-appsec-uat", stage: "UAT", text: "UAT valida la versión desplegada con usuarios clave.", from: [82, 62], to: [62, 76], guard: "uat" },
+      { id: "prod", edge: "edge-uat-prod", stage: "CD Prod", text: "Con AppSec, UAT y aprobación Prod, se despliega a producción.", from: [66, 76], to: [82, 76] }
+    ];
+
+    const details = {
+      repo: ["Azure Repos", "Entrada del flujo. Un push a main dispara el pipeline oficial; PR puede validarse por branch policies."],
+      ci: ["CI", "Corre en Microsoft-hosted agent: instala SDK/runtime, compila, prueba, ejecuta SCA y genera el paquete Fortify."],
+      snyk: ["Snyk SCA", "Analiza dependencias NuGet o npm. Requiere service connection y salida a internet desde CI."],
+      artifacts: ["Artefactos", "Publica aplicación versionada y FortifyPackage. CD y SAST consumen esos binarios sin recompilar."],
+      sast: ["SAST on-prem", "Agente self-hosted con acceso a ScanCentral. No necesita internet, solo red interna Fortify."],
+      fortify: ["Fortify SSC", "Recibe resultados SAST y aplica quality gate. Critical/High fuera de umbral detienen el pipeline."],
+      cdtest: ["CD Test + scanning agent", "Despliega en QA/Test, valida salud, puede hacer rollback y ejecuta DAST desde la red interna."],
+      qa: ["IIS QA/Test", "Servidor interno. No necesita exposición pública para DAST porque el tráfico de prueba sale del agente self-hosted."],
+      snykapi: ["Snyk API & Web", "Orquesta el scan, conserva resultados y umbrales. El agente se comunica por salida HTTPS 443."],
+      appsec: ["Security Review", "Seguridad en Aplicaciones revisa reportes, triagea hallazgos, acuerda remediación o documenta excepciones."],
+      uat: ["UAT", "Validación funcional/de negocio sobre la versión en QA/Test. La aprobación vive en Azure DevOps Environment."],
+      prod: ["CD Prod", "Deployment job con Environment approvals. Solo corre con la condición de rama main y mantiene rollback."]
+    };
+
+    const state = { index: -1, playing: false, speed: 1, timers: [] };
+    const nodes = [...document.querySelectorAll(".node")];
+    const packet = document.getElementById("packet");
+    const log = document.getElementById("log");
+    const play = document.getElementById("play");
+    const playText = document.getElementById("playText");
+    const playIcon = document.getElementById("playIcon");
+    const speedButton = document.getElementById("speed");
+
+    function enabled(step) {
+      if (!step.guard) return true;
+      return document.getElementById(`toggle-${step.guard}`).checked;
+    }
+
+    function writeLog(text, current = false) {
+      const item = document.createElement("div");
+      item.className = current ? "now" : "";
+      item.textContent = `> ${text}`;
+      log.appendChild(item);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function setDetail(id) {
+      const [title, text] = details[id];
+      document.getElementById("detailTitle").textContent = title;
+      document.getElementById("detailText").textContent = text;
+      nodes.forEach(node => node.classList.toggle("active", node.dataset.id === id));
+    }
+
+    function setStageDone(stage) {
+      const pill = document.querySelector(`[data-stage="${stage}"]`);
+      if (!pill) return;
+      pill.classList.add("done");
+      pill.querySelector("span").textContent = "Completado";
+    }
+
+    function animatePacket(step) {
+      packet.classList.remove("run");
+      packet.style.setProperty("--x1", `${step.from[0]}%`);
+      packet.style.setProperty("--y1", `${step.from[1]}%`);
+      packet.style.setProperty("--x2", `${step.to[0]}%`);
+      packet.style.setProperty("--y2", `${step.to[1]}%`);
+      packet.style.background = getComputedStyle(document.getElementById(step.edge)).color;
+      void packet.offsetWidth;
+      packet.classList.add("run");
+    }
+
+    function clearActiveEdges() {
+      document.querySelectorAll(".flow path").forEach(path => path.classList.remove("active"));
+    }
+
+    function dimDisabledNodes() {
+      document.querySelector(".snyk").classList.toggle("dim", !document.getElementById("toggle-sca").checked);
+      document.querySelector(".sast").classList.toggle("dim", !document.getElementById("toggle-sast").checked);
+      document.querySelector(".fortify").classList.toggle("dim", !document.getElementById("toggle-sast").checked);
+      document.querySelector(".snykapi").classList.toggle("dim", !document.getElementById("toggle-dast").checked);
+      document.querySelector(".appsec").classList.toggle("dim", !document.getElementById("toggle-appsec").checked);
+      document.querySelector(".uat").classList.toggle("dim", !document.getElementById("toggle-uat").checked);
+    }
+
+    function advance() {
+      clearActiveEdges();
+      let next = state.index + 1;
+      while (next < steps.length && !enabled(steps[next])) next++;
+      if (next >= steps.length) {
+        state.playing = false;
+        playText.textContent = "Reproducir";
+        playIcon.textContent = "▶";
+        writeLog("Flujo completado.", true);
+        return;
+      }
+
+      state.index = next;
+      const step = steps[state.index];
+      document.getElementById(step.edge).classList.add("active");
+      setDetail(step.id);
+      animatePacket(step);
+      writeLog(step.text, true);
+      setStageDone(step.stage);
+
+      if (state.playing) state.timers.push(setTimeout(advance, 1900 / state.speed));
+    }
+
+    function reset() {
+      state.timers.forEach(clearTimeout);
+      state.timers = [];
+      state.index = -1;
+      state.playing = false;
+      playText.textContent = "Reproducir";
+      playIcon.textContent = "▶";
+      clearActiveEdges();
+      nodes.forEach(node => node.classList.remove("active"));
+      document.querySelectorAll(".stage-pill").forEach(pill => {
+        pill.classList.remove("done");
+        pill.querySelector("span").textContent = "Pendiente";
+      });
+      log.innerHTML = "";
+      packet.classList.remove("run");
+      writeLog("Listo para simular la pipeline.", true);
+      document.getElementById("detailTitle").textContent = "Selecciona un nodo";
+      document.getElementById("detailText").textContent = "Reproduce el flujo o selecciona una pieza de la arquitectura para ver su responsabilidad, aprobadores y límites de red.";
+      dimDisabledNodes();
+    }
+
+    play.addEventListener("click", () => {
+      state.playing = !state.playing;
+      playText.textContent = state.playing ? "Pausar" : "Reproducir";
+      playIcon.textContent = state.playing ? "Ⅱ" : "▶";
+      if (state.playing) advance();
+      else state.timers.forEach(clearTimeout);
+    });
+
+    document.getElementById("step").addEventListener("click", advance);
+    document.getElementById("reset").addEventListener("click", reset);
+    speedButton.addEventListener("click", () => {
+      state.speed = state.speed === 1 ? 1.5 : state.speed === 1.5 ? 2 : 1;
+      speedButton.textContent = `${state.speed}x`;
+    });
+
+    document.querySelectorAll("input[type='checkbox']").forEach(input => {
+      input.addEventListener("change", () => {
+        dimDisabledNodes();
+        writeLog(`${input.parentElement.textContent.trim()}: ${input.checked ? "habilitado" : "omitido"}.`);
+      });
+    });
+
+    nodes.forEach(node => {
+      node.addEventListener("click", () => setDetail(node.dataset.id));
+      node.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          setDetail(node.dataset.id);
+        }
+      });
+    });
+
+    reset();
+  </script>
+</body>
+</html>

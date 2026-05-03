@@ -8,6 +8,8 @@ graph TD
         CI["Microsoft-hosted agent<br/>CI"]
         SNYK["Snyk Open Source<br/>SCA"]
         DAST["Snyk API & Web<br/>orquestación DAST"]
+        APPSEC_ENV["Environment<br/>SecurityReview"]
+        UAT_ENV["Environment<br/>UAT"]
 
         REPO --> PIPE
         PIPE --> CI
@@ -34,11 +36,16 @@ graph TD
         subgraph CD_ZONE["CD on-prem"]
             CD_TEST["Self-hosted agent<br/>CD Test + scanning agent"]
             CD_PROD["Self-hosted agent<br/>CD Prod"]
+            APPSEC["AppSec Review<br/>SCA + SAST + DAST"]
+            UAT["UAT<br/>aceptación negocio"]
             IIS_TEST["IIS Test"]
             IIS_PROD["IIS Prod"]
 
             CD_TEST -->|"backup + Web Deploy + health check"| IIS_TEST
             CD_TEST -->|"pruebas DAST por red interna"| IIS_TEST
+            CD_TEST --> APPSEC
+            APPSEC --> UAT
+            UAT --> CD_PROD
             CD_PROD -->|"backup + Web Deploy + health check"| IIS_PROD
         end
     end
@@ -48,11 +55,17 @@ graph TD
     FW --> CD_TEST
     FW --> CD_PROD
     CD_TEST -->|"inicia scan y reporta resultados HTTPS 443"| DAST
+    ENV -.-> APPSEC_ENV
+    ENV -.-> UAT_ENV
+    APPSEC_ENV -.->|"aprobación AppSec"| APPSEC
+    UAT_ENV -.->|"aprobación UAT"| UAT
     ENV -.->|"aprobación Prod"| CD_PROD
 
     CI ==>|"CI aprobado"| SAST
     SAST ==>|"SAST aprobado"| CD_TEST
-    CD_TEST ==>|"Test aprobado"| CD_PROD
+    CD_TEST ==>|"Test + DAST"| APPSEC
+    APPSEC ==>|"riesgo aceptable"| UAT
+    UAT ==>|"aceptación negocio"| CD_PROD
 
     style CLOUD fill:#eef5ff,stroke:#0078d4
     style ONPREM fill:#f7f7f7,stroke:#555
@@ -64,3 +77,5 @@ graph TD
     style SSC fill:#c50f1f,color:#fff
     style IIS_TEST fill:#2b88d8,color:#fff
     style IIS_PROD fill:#ff8c00,color:#fff
+    style APPSEC fill:#7c2d12,color:#fff
+    style UAT fill:#0f766e,color:#fff

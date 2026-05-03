@@ -64,6 +64,21 @@ stages:
       snykApiWebSeverityThreshold: 'HIGH'
       snykApiWebFailOnIssues: true
 
+  - template: ../templates/stage-security-review.yml
+    parameters:
+      environment: 'SecurityReview'
+      pool: 'Pool-Test'
+      dependsOn: 'CD_Test'
+      applicationName: 'MiApp'
+      minimumBlockingSeverity: 'High'
+
+  - template: ../templates/stage-uat.yml
+    parameters:
+      environment: 'UAT'
+      pool: 'Pool-Test'
+      dependsOn: 'Security_Review'
+      applicationName: 'MiApp'
+
   - template: ../templates/stage-cd.yml
     parameters:
       environment: 'Prod'
@@ -73,6 +88,6 @@ stages:
       deployPath: 'C:\inetpub\wwwroot\MiApp'
       backupPath: 'C:\deploy-backups\MiApp'
       healthCheckEndpoint: '/health'
-      dependsOn: 'CD_Test'
+      dependsOn: 'UAT'
       condition: "and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))"
       enableSnykApiWebDAST: false

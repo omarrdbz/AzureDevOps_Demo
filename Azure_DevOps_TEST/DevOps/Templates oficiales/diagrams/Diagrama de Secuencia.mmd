@@ -13,6 +13,8 @@ sequenceDiagram
     participant CDTest as Self-hosted CD Test / Scanning Agent
     participant IISTest as IIS Test
     participant DAST as Snyk API & Web
+    participant AppSec as Seguridad en Aplicaciones
+    participant UAT as UAT / Negocio
     participant Approver as Environment Approval
     participant CDProd as Self-hosted CD Prod
     participant IISProd as IIS Prod
@@ -60,6 +62,14 @@ sequenceDiagram
             CDTest->>DAST: Reporta hallazgos y estado
             DAST-->>CDTest: Resultado por severidad
         end
+
+        Pipe->>AppSec: Environment SecurityReview
+        AppSec->>AppSec: Revisa reportes SCA, SAST y DAST
+        AppSec->>Pipe: Aprueba, rechaza o documenta excepción
+
+        Pipe->>UAT: Environment UAT
+        UAT->>IISTest: Valida versión desplegada en QA/Test
+        UAT->>Pipe: Aceptación funcional
 
         Pipe->>Approver: Solicita aprobación Prod
         Approver-->>Pipe: Aprobado

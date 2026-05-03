@@ -1,0 +1,50 @@
+parameters:
+  - name: environment
+    type: string
+    default: 'SecurityReview'
+
+  - name: pool
+    type: string
+
+  - name: dependsOn
+    type: string
+    default: 'CD_Test'
+
+  - name: condition
+    type: string
+    default: 'succeeded()'
+
+  - name: applicationName
+    type: string
+    default: 'WebApp'
+
+  - name: minimumBlockingSeverity
+    type: string
+    default: 'High'
+    values:
+      - Critical
+      - High
+      - Medium
+
+stages:
+  - stage: Security_Review
+    displayName: 'Security Review — AppSec'
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    pool:
+      name: ${{ parameters.pool }}
+    jobs:
+      - deployment: AppSecReview
+        displayName: 'AppSec review and risk decision'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - powershell: |
+                    Write-Host "Application:              ${{ parameters.applicationName }}"
+                    Write-Host "Blocking severity:        ${{ parameters.minimumBlockingSeverity }}"
+                    Write-Host "Required evidence:        SCA, SAST and DAST reports reviewed"
+                    Write-Host "Required decision:        approve, reject, or document risk acceptance"
+                    Write-Host "Required follow-up:       findings assigned to development owners"
+                  displayName: 'Record AppSec review context'

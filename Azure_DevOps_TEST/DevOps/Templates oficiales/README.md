@@ -18,6 +18,8 @@ Templates oficiales/
     ├── stage-ci.yml
     ├── stage-sast.yml
     ├── stage-cd.yml
+    ├── stage-security-review.yml
+    ├── stage-uat.yml
     ├── steps-ci.yml
     ├── steps-sast-fortify.yml
     └── steps-cd-iis.yml
@@ -32,6 +34,8 @@ El pipeline separa responsabilidades por conectividad:
 | CI | Microsoft-hosted | Build, test, Snyk SCA, paquete Fortify y publicación de artefactos | Internet |
 | SAST | Self-hosted on-prem | Envío a ScanCentral y quality gate en Fortify SSC | Red interna Fortify |
 | CD Test | Self-hosted on-prem | Backup, Web Deploy, health check, rollback y DAST | IIS interno + salida a `api.probely.com:443` |
+| Security Review | Environment approval | Revisión AppSec de SCA, SAST, DAST y decisión de riesgo | Azure DevOps Environment |
+| UAT | Environment approval | Validación funcional/de negocio antes de producción | Azure DevOps Environment |
 | CD Prod | Self-hosted on-prem | Backup, Web Deploy, health check y rollback | IIS interno |
 
 Diagramas:
@@ -39,6 +43,7 @@ Diagramas:
 - [Arquitectura](diagrams/Arquitectura.mmd)
 - [Diagrama de Secuencia](diagrams/Diagrama%20de%20Secuencia.mmd)
 - [Conexión a Snyk](diagrams/Conexi%C3%B3n%20a%20Snyk.mmd)
+- [Arquitectura interactiva](arquitectura-pipelines.html)
 
 ## Flujo
 
@@ -47,7 +52,9 @@ Diagramas:
 3. SAST descarga solo el paquete Fortify, lo envía a ScanCentral y evalúa Critical/High en SSC.
 4. CD Test descarga la aplicación, crea backup, despliega con Web Deploy, ejecuta health check y hace rollback automático si falla.
 5. CD Test actúa como scanning agent: inicia el scan en Snyk API & Web, ejecuta las pruebas DAST contra QA por red interna y reporta resultados.
-6. CD Prod despliega el mismo artefacto aprobado, condicionado a rama `main` y aprobaciones del Environment.
+6. Security Review exige revisión formal de reportes SCA, SAST y DAST por Seguridad en Aplicaciones.
+7. UAT exige aceptación funcional/de negocio sobre la versión desplegada en QA/Test.
+8. CD Prod despliega el mismo artefacto aprobado, condicionado a rama `main` y aprobaciones del Environment.
 
 ## Templates
 
@@ -100,6 +107,31 @@ Parámetros principales:
 | `healthCheckEndpoint` | Endpoint usado para validar el despliegue |
 | `enableAutoRollback` | Restaura backup si el health check falla |
 | `enableSnykApiWebDAST` | Ejecuta DAST post-deploy desde el agente self-hosted |
+
+### `stage-security-review.yml`
+
+Stage de aprobación y evidencia para Seguridad en Aplicaciones.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `environment` | Environment que contiene aprobadores/checks AppSec |
+| `pool` | Agent Pool usado para registrar evidencia mínima |
+| `applicationName` | Aplicación revisada |
+| `minimumBlockingSeverity` | Severidad mínima que bloquea promoción |
+
+### `stage-uat.yml`
+
+Stage de aprobación UAT para validación funcional/de negocio.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `environment` | Environment que contiene aprobadores/checks UAT |
+| `pool` | Agent Pool usado para registrar evidencia mínima |
+| `applicationName` | Aplicación validada |
 
 ## Variables
 
@@ -155,6 +187,8 @@ CD:
 | SCA | Snyk Open Source y escaneo nativo opcional |
 | SAST | Fortify ScanCentral con quality gate |
 | DAST | Snyk API & Web orquestado desde el agente self-hosted en Test |
+| AppSec Review | Environment approval para revisar reportes y registrar decisión de riesgo |
+| UAT | Environment approval para aceptación funcional/de negocio |
 | Rollback | Backup pre-deploy y restauración automática |
 | Reproducibilidad | Herramientas esperadas en el agente; no se instalan dinámicamente en runtime |
 | Prod controlado | Environment approvals y condición de rama `main` |
@@ -175,9 +209,32 @@ Requisitos de red:
 
 1. Copiar uno de los ejemplos en `pipelines/`.
 2. Ajustar nombres de app, rutas, pools, variable groups y URLs Fortify.
-3. Crear los Variable Groups y Environments.
-4. Configurar aprobaciones en `Pipelines > Environments`.
-5. Crear el pipeline desde el YAML.
+3. Crear los Variable Groups.
+4. Crear los Environments `Test`, `SecurityReview`, `UAT` y `Prod`.
+5. Configurar aprobaciones en `Pipelines > Environments`.
+6. Asignar aprobadores AppSec en `SecurityReview` y aprobadores de negocio en `UAT`.
+7. Crear el pipeline desde el YAML.
+
+## Proceso AppSec y UAT
+
+`SecurityReview` y `UAT` se implementan como deployment jobs para usar approvals/checks nativos de Azure DevOps Environments. El YAML registra contexto y evidencia mínima, pero la aprobación formal se configura fuera del código en el Environment.
+
+Responsabilidades:
+
+| Punto de control | Responsable | Evidencia |
+|---|---|---|
+| SecurityReview | Seguridad en Aplicaciones | Reportes SCA/SAST/DAST revisados, hallazgos triageados, riesgos aceptados o bloqueados |
+| UAT | Product Owner, QA funcional o usuarios clave | Validación funcional, evidencia de aceptación y autorización de promoción |
+| Prod | Release/CAB/Operaciones | Aprobación final y ventana de despliegue |
+
+Política recomendada:
+
+| Severidad | Acción |
+|---|---|
+| Critical / High | Bloquear promoción salvo excepción formal de riesgo |
+| Medium | Permitir UAT si existe plan de remediación y responsable |
+| Low | Registrar y atender por backlog/SLA |
+| Falso positivo | Documentar justificación en la herramienta de seguridad |
 
 Ejemplos:
 
