@@ -89,6 +89,9 @@ Parámetros principales:
 | `buildPlatform` | Plataforma MSBuild, por ejemplo `Any CPU` |
 | `vsVersion` | Versión de Visual Studio para `VSBuild@1`, por defecto `17.0` |
 | `enableSnykSCA` | Habilita Snyk Open Source |
+| `enableNativeDependencyScan` | Habilita NuGet Audit nativo durante restore |
+| `nativeDependencySeverityThreshold` | Severidad mínima para reportar: `low`, `moderate`, `high` o `critical` |
+| `nativeDependencyFailOnIssues` | Bloquea el pipeline si NuGet Audit encuentra hallazgos sobre el umbral |
 | `enableFortifyPackage` | Publica `FortifyPackage-{BuildNumber}` |
 
 ### `stage-sast.yml`

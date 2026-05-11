@@ -58,6 +58,23 @@ parameters:
     type: boolean
     default: true
 
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
+
+  - name: nativeDependencySeverityThreshold
+    type: string
+    default: 'high'
+    values:
+      - low
+      - moderate
+      - high
+      - critical
+
+  - name: nativeDependencyFailOnIssues
+    type: boolean
+    default: false
+
   - name: snykServiceConnection
     type: string
     default: 'sc-snyk'
@@ -101,6 +118,9 @@ stages:
               runTests: ${{ parameters.runTests }}
               testAssemblyPattern: ${{ parameters.testAssemblyPattern }}
               enableSnykSCA: ${{ parameters.enableSnykSCA }}
+              enableNativeDependencyScan: ${{ parameters.enableNativeDependencyScan }}
+              nativeDependencySeverityThreshold: ${{ parameters.nativeDependencySeverityThreshold }}
+              nativeDependencyFailOnIssues: ${{ parameters.nativeDependencyFailOnIssues }}
               snykServiceConnection: ${{ parameters.snykServiceConnection }}
               snykFailOnIssues: ${{ parameters.snykFailOnIssues }}
               enableFortifyPackage: ${{ parameters.enableFortifyPackage }}

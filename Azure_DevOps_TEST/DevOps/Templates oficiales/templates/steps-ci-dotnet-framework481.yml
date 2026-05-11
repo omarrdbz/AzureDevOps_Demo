@@ -13,6 +13,7 @@
 #   - Extension "Snyk Security Scan" instalada en Azure DevOps.
 #   - Service Connection Snyk configurado (default: sc-snyk).
 #   - Extension "Fortify" instalada para disponer de scancentral.
+#   - NuGet 6.10+ para NuGet Audit en proyectos con packages.config.
 #
 # ARTEFACTOS PUBLICADOS:
 #   1. {artifactName}-{BuildNumber}-{Branch} -> contenido publicado de la app.
@@ -81,6 +82,23 @@ parameters:
   - name: enableSnykSCA
     type: boolean
     default: true
+
+  - name: enableNativeDependencyScan
+    type: boolean
+    default: true
+
+  - name: nativeDependencySeverityThreshold
+    type: string
+    default: 'high'
+    values:
+      - low
+      - moderate
+      - high
+      - critical
+
+  - name: nativeDependencyFailOnIssues
+    type: boolean
+    default: false
 
   - name: snykServiceConnection
     type: string
@@ -216,7 +234,86 @@ steps:
         failOnIssues: ${{ parameters.snykFailOnIssues }}
 
   # ===========================================================================
-  # SECCION 6: FORTIFY SCANCENTRAL - PAQUETE OFFLINE
+  # SECCION 6: DEPENDENCY SCAN NATIVO - NUGET AUDIT
+  # ===========================================================================
+  - ${{ if eq(parameters.enableNativeDependencyScan, true) }}:
+    - powershell: |
+        $solutionPath = "${{ parameters.solutionPath }}"
+        $nugetConfigPath = "${{ parameters.nugetConfigPath }}"
+        $threshold = "${{ parameters.nativeDependencySeverityThreshold }}"
+        $failOnIssues = [System.Convert]::ToBoolean("${{ parameters.nativeDependencyFailOnIssues }}")
+
+        $severityCodes = @{
+            low = @('NU1901', 'NU1902', 'NU1903', 'NU1904')
+            moderate = @('NU1902', 'NU1903', 'NU1904')
+            high = @('NU1903', 'NU1904')
+            critical = @('NU1904')
+        }
+
+        $restoreTarget = $solutionPath
+        if ($restoreTarget -match '[\*\?]') {
+            $leaf = Split-Path $restoreTarget -Leaf
+            $matches = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)" -Recurse -Filter $leaf -File
+            if ($matches.Count -ne 1) {
+                Write-Host "##vso[task.logissue type=error]solutionPath '$restoreTarget' debe resolver a un unico archivo para NuGet Audit. Coincidencias: $($matches.Count)"
+                exit 1
+            }
+            $restoreTarget = $matches[0].FullName
+        }
+
+        $nuget = Get-Command nuget.exe -ErrorAction SilentlyContinue
+        if (-not $nuget) {
+            Write-Host "##vso[task.logissue type=error]nuget.exe no fue encontrado en PATH despues de NuGetToolInstaller."
+            exit 1
+        }
+
+        Write-Host "NuGet Audit nativo"
+        Write-Host "Target:      $restoreTarget"
+        Write-Host "Threshold:   $threshold"
+        Write-Host "Fail issues: $failOnIssues"
+
+        $args = @('restore', $restoreTarget, '-NonInteractive', '-Verbosity', 'detailed')
+        if (-not [string]::IsNullOrWhiteSpace($nugetConfigPath)) {
+            $args += @('-ConfigFile', $nugetConfigPath)
+        }
+
+        & $nuget.Source @args 2>&1 | Tee-Object -Variable auditOutput
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -ne 0) {
+            Write-Host "##vso[task.logissue type=error]NuGet restore/audit fallo con exit code $exitCode"
+            exit $exitCode
+        }
+
+        $codesToEvaluate = $severityCodes[$threshold]
+        $findings = @()
+        foreach ($line in $auditOutput) {
+            foreach ($code in $codesToEvaluate) {
+                if ($line -match "\b$code\b") {
+                    $findings += $line
+                    break
+                }
+            }
+        }
+
+        if ($findings.Count -gt 0) {
+            $message = "NuGet Audit encontro $($findings.Count) hallazgo(s) con severidad >= $threshold."
+            if ($failOnIssues) {
+                Write-Host "##vso[task.logissue type=error]$message"
+                $findings | Select-Object -First 20 | ForEach-Object { Write-Host "##vso[task.logissue type=error]$_" }
+                exit 1
+            }
+
+            Write-Host "##vso[task.logissue type=warning]$message"
+            $findings | Select-Object -First 20 | ForEach-Object { Write-Host "##vso[task.logissue type=warning]$_" }
+        } else {
+            Write-Host "NuGet Audit no encontro hallazgos con severidad >= $threshold."
+        }
+      displayName: 'Dependency Scan - NuGet Audit'
+      continueOnError: ${{ not(parameters.nativeDependencyFailOnIssues) }}
+
+  # ===========================================================================
+  # SECCION 7: FORTIFY SCANCENTRAL - PAQUETE OFFLINE
   # ===========================================================================
   - ${{ if eq(parameters.enableFortifyPackage, true) }}:
     - powershell: |
@@ -260,13 +357,13 @@ steps:
       displayName: 'Publicar paquete ScanCentral'
 
   # ===========================================================================
-  # SECCION 7: STEPS ADICIONALES (pre-publish hook)
+  # SECCION 8: STEPS ADICIONALES (pre-publish hook)
   # ===========================================================================
   - ${{ each step in parameters.prePublishSteps }}:
     - ${{ step }}
 
   # ===========================================================================
-  # SECCION 8: PUBLICAR ARTEFACTO INMUTABLE
+  # SECCION 9: PUBLICAR ARTEFACTO INMUTABLE
   # ===========================================================================
   - publish: $(Build.ArtifactStagingDirectory)/app
     artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
