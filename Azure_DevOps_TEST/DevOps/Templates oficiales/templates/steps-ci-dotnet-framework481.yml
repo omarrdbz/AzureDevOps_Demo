@@ -1,0 +1,273 @@
+# =============================================================================
+# TEMPLATE: Steps de CI - .NET Framework 4.8.1
+# =============================================================================
+# Capa:       Steps (se invoca desde stage-ci-dotnet-framework481.yml)
+# Proposito: Restaurar NuGet, compilar con Visual Studio/MSBuild, ejecutar tests,
+#            escanear dependencias con Snyk, empaquetar codigo para Fortify
+#            ScanCentral y publicar artefactos para CD IIS.
+# Target:    Aplicaciones .NET Framework 4.8.1, especialmente ASP.NET/IIS.
+#
+# REQUISITOS:
+#   - Agente Windows con Visual Studio 2022 17.3+ y .NET Framework 4.8.1
+#     Developer Pack/Targeting Pack.
+#   - Extension "Snyk Security Scan" instalada en Azure DevOps.
+#   - Service Connection Snyk configurado (default: sc-snyk).
+#   - Extension "Fortify" instalada para disponer de scancentral.
+#
+# ARTEFACTOS PUBLICADOS:
+#   1. {artifactName}-{BuildNumber}-{Branch} -> contenido publicado de la app.
+#   2. FortifyPackage-{BuildNumber}          -> scancentral-pkg.zip.
+#
+# USO:
+#   - template: templates/steps-ci-dotnet-framework481.yml
+#     parameters:
+#       solutionPath: 'src/MiApp/MiApp.sln'
+#       projectPath: 'src/MiApp.Web/MiApp.Web.csproj'
+#       artifactName: 'MiApp'
+# =============================================================================
+
+parameters:
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: solutionPath
+    type: string
+    default: '**/*.sln'
+
+  - name: projectPath
+    type: string
+    default: ''
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  - name: buildPlatform
+    type: string
+    default: 'Any CPU'
+
+  - name: vsVersion
+    type: string
+    default: '17.0'
+
+  - name: msbuildArchitecture
+    type: string
+    default: 'x64'
+    values:
+      - x86
+      - x64
+
+  - name: nugetVersion
+    type: string
+    default: '6.x'
+
+  - name: nugetConfigPath
+    type: string
+    default: ''
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testAssemblyPattern
+    type: string
+    default: |
+      **\*test*.dll
+      **\*tests*.dll
+      !**\*TestAdapter.dll
+      !**\obj\**
+
+  - name: enableSnykSCA
+    type: boolean
+    default: true
+
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+
+  - name: snykFailOnIssues
+    type: boolean
+    default: false
+
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+steps:
+  # ===========================================================================
+  # SECCION 1: VALIDACION DEL AGENTE
+  # ===========================================================================
+  - powershell: |
+      Write-Host "Validando herramientas para .NET Framework 4.8.1..."
+
+      $releaseKey = Get-ItemPropertyValue `
+        -Path 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' `
+        -Name Release `
+        -ErrorAction SilentlyContinue
+
+      if (-not $releaseKey -or $releaseKey -lt 533320) {
+          Write-Host "##vso[task.logissue type=warning].NET Framework 4.8.1 runtime/targeting pack no fue detectado por Release Key >= 533320."
+          Write-Host "Si la compilacion falla por targeting pack, usar una imagen con VS 2022 17.3+ o instalar .NET Framework 4.8.1 Developer Pack en el agente self-hosted."
+      } else {
+          Write-Host ".NET Framework 4.8.1 detectado. Release Key: $releaseKey"
+      }
+
+      $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+      if (Test-Path $vswhere) {
+          & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationVersion
+      } else {
+          Write-Host "##vso[task.logissue type=warning]vswhere.exe no encontrado; VSBuild validara Visual Studio durante la compilacion."
+      }
+    displayName: 'Validar agente .NET Framework 4.8.1'
+
+  # ===========================================================================
+  # SECCION 2: RESTORE NUGET
+  # ===========================================================================
+  - task: NuGetToolInstaller@1
+    displayName: 'Instalar NuGet ${{ parameters.nugetVersion }}'
+    inputs:
+      versionSpec: '${{ parameters.nugetVersion }}'
+
+  - ${{ if eq(parameters.nugetConfigPath, '') }}:
+    - task: NuGetCommand@2
+      displayName: 'Restore NuGet packages'
+      inputs:
+        command: 'restore'
+        restoreSolution: '${{ parameters.solutionPath }}'
+
+  - ${{ if ne(parameters.nugetConfigPath, '') }}:
+    - task: NuGetCommand@2
+      displayName: 'Restore NuGet packages'
+      inputs:
+        command: 'restore'
+        restoreSolution: '${{ parameters.solutionPath }}'
+        feedsToUse: 'config'
+        nugetConfigPath: '${{ parameters.nugetConfigPath }}'
+
+  # ===========================================================================
+  # SECCION 3: BUILD Y PUBLICACION A CARPETA
+  # ===========================================================================
+  - task: VSBuild@1
+    displayName: 'Build solution - ${{ parameters.buildConfiguration }}'
+    inputs:
+      solution: '${{ parameters.solutionPath }}'
+      vsVersion: '${{ parameters.vsVersion }}'
+      platform: '${{ parameters.buildPlatform }}'
+      configuration: '${{ parameters.buildConfiguration }}'
+      msbuildArchitecture: '${{ parameters.msbuildArchitecture }}'
+      clean: true
+      restoreNugetPackages: false
+
+  - ${{ if ne(parameters.projectPath, '') }}:
+    - task: VSBuild@1
+      displayName: 'Publish web project to artifact staging'
+      inputs:
+        solution: '${{ parameters.projectPath }}'
+        vsVersion: '${{ parameters.vsVersion }}'
+        platform: '${{ parameters.buildPlatform }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+        msbuildArchitecture: '${{ parameters.msbuildArchitecture }}'
+        restoreNugetPackages: false
+        msbuildArgs: >
+          /p:DeployOnBuild=true
+          /p:WebPublishMethod=FileSystem
+          /p:DeleteExistingFiles=true
+          /p:publishUrl="$(Build.ArtifactStagingDirectory)\app"
+
+  - ${{ if eq(parameters.projectPath, '') }}:
+    - powershell: |
+        Write-Host "##vso[task.logissue type=error]projectPath es requerido para publicar el artefacto IIS."
+        Write-Host "Ejemplo: projectPath: 'src/MiApp.Web/MiApp.Web.csproj'"
+        exit 1
+      displayName: 'Validar projectPath para publish'
+
+  # ===========================================================================
+  # SECCION 4: TEST
+  # ===========================================================================
+  - ${{ if eq(parameters.runTests, true) }}:
+    - task: VSTest@2
+      displayName: 'Run tests'
+      inputs:
+        testSelector: 'testAssemblies'
+        testAssemblyVer2: '${{ parameters.testAssemblyPattern }}'
+        searchFolder: '$(System.DefaultWorkingDirectory)'
+        platform: '${{ parameters.buildPlatform }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+        diagnosticsEnabled: true
+
+  # ===========================================================================
+  # SECCION 5: SECURITY - SNYK SCA
+  # ===========================================================================
+  - ${{ if eq(parameters.enableSnykSCA, true) }}:
+    - task: SnykSecurityScan@1
+      displayName: 'SCA - Snyk Open Source'
+      inputs:
+        serviceConnectionEndpoint: '${{ parameters.snykServiceConnection }}'
+        testType: 'app'
+        failOnIssues: ${{ parameters.snykFailOnIssues }}
+
+  # ===========================================================================
+  # SECCION 6: FORTIFY SCANCENTRAL - PAQUETE OFFLINE
+  # ===========================================================================
+  - ${{ if eq(parameters.enableFortifyPackage, true) }}:
+    - powershell: |
+        $buildId = "${{ coalesce(parameters.fortifyBuildId, parameters.artifactName) }}"
+        $outputFile = "$(Build.ArtifactStagingDirectory)\scancentral-pkg.zip"
+        $buildFile = "${{ parameters.solutionPath }}"
+
+        if ($buildFile -match '[\*\?]') {
+            $leaf = Split-Path $buildFile -Leaf
+            $matches = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)" -Recurse -Filter $leaf -File
+            if ($matches.Count -ne 1) {
+                Write-Host "##vso[task.logissue type=error]solutionPath '$buildFile' debe resolver a un unico archivo para Fortify ScanCentral. Coincidencias: $($matches.Count)"
+                exit 1
+            }
+            $buildFile = $matches[0].FullName
+        }
+
+        Write-Host "FORTIFY SCANCENTRAL - Package (Offline)"
+        Write-Host "Build ID:   $buildId"
+        Write-Host "Build Tool: msbuild"
+        Write-Host "Build file: $buildFile"
+        Write-Host "Output:     $outputFile"
+
+        scancentral package `
+            -bt msbuild `
+            -bf $buildFile `
+            -b $buildId `
+            -o $outputFile
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "##vso[task.logissue type=error]ScanCentral package fallo con exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
+
+        $size = (Get-Item $outputFile).Length / 1MB
+        Write-Host "Paquete creado: $outputFile ($([math]::Round($size, 2)) MB)"
+      displayName: 'Fortify ScanCentral - Package (.NET Framework)'
+
+    - publish: $(Build.ArtifactStagingDirectory)/scancentral-pkg.zip
+      artifact: 'FortifyPackage-$(Build.BuildNumber)'
+      displayName: 'Publicar paquete ScanCentral'
+
+  # ===========================================================================
+  # SECCION 7: STEPS ADICIONALES (pre-publish hook)
+  # ===========================================================================
+  - ${{ each step in parameters.prePublishSteps }}:
+    - ${{ step }}
+
+  # ===========================================================================
+  # SECCION 8: PUBLICAR ARTEFACTO INMUTABLE
+  # ===========================================================================
+  - publish: $(Build.ArtifactStagingDirectory)/app
+    artifact: '${{ parameters.artifactName }}-$(Build.BuildNumber)-$(Build.SourceBranchName)'
+    displayName: 'Publicar artefacto de aplicacion'

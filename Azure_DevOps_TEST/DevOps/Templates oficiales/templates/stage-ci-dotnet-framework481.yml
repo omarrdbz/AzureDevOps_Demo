@@ -1,0 +1,108 @@
+parameters:
+  - name: vmImage
+    type: string
+    default: 'windows-2022'
+
+  - name: artifactName
+    type: string
+    default: 'WebApp'
+
+  - name: solutionPath
+    type: string
+    default: '**/*.sln'
+
+  - name: projectPath
+    type: string
+    default: ''
+
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+
+  - name: buildPlatform
+    type: string
+    default: 'Any CPU'
+
+  - name: vsVersion
+    type: string
+    default: '17.0'
+
+  - name: msbuildArchitecture
+    type: string
+    default: 'x64'
+    values:
+      - x86
+      - x64
+
+  - name: nugetVersion
+    type: string
+    default: '6.x'
+
+  - name: nugetConfigPath
+    type: string
+    default: ''
+
+  - name: runTests
+    type: boolean
+    default: true
+
+  - name: testAssemblyPattern
+    type: string
+    default: |
+      **\*test*.dll
+      **\*tests*.dll
+      !**\*TestAdapter.dll
+      !**\obj\**
+
+  - name: enableSnykSCA
+    type: boolean
+    default: true
+
+  - name: snykServiceConnection
+    type: string
+    default: 'sc-snyk'
+
+  - name: snykFailOnIssues
+    type: boolean
+    default: false
+
+  - name: enableFortifyPackage
+    type: boolean
+    default: true
+
+  - name: fortifyBuildId
+    type: string
+    default: ''
+
+  - name: prePublishSteps
+    type: stepList
+    default: []
+
+stages:
+  - stage: CI
+    displayName: 'CI - .NET Framework 4.8.1 Build, Test, SCA & Fortify Package'
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    jobs:
+      - job: Build
+        displayName: 'Build, Scan & Publish Artifacts'
+        steps:
+          - template: steps-ci-dotnet-framework481.yml
+            parameters:
+              artifactName: ${{ parameters.artifactName }}
+              solutionPath: ${{ parameters.solutionPath }}
+              projectPath: ${{ parameters.projectPath }}
+              buildConfiguration: ${{ parameters.buildConfiguration }}
+              buildPlatform: ${{ parameters.buildPlatform }}
+              vsVersion: ${{ parameters.vsVersion }}
+              msbuildArchitecture: ${{ parameters.msbuildArchitecture }}
+              nugetVersion: ${{ parameters.nugetVersion }}
+              nugetConfigPath: ${{ parameters.nugetConfigPath }}
+              runTests: ${{ parameters.runTests }}
+              testAssemblyPattern: ${{ parameters.testAssemblyPattern }}
+              enableSnykSCA: ${{ parameters.enableSnykSCA }}
+              snykServiceConnection: ${{ parameters.snykServiceConnection }}
+              snykFailOnIssues: ${{ parameters.snykFailOnIssues }}
+              enableFortifyPackage: ${{ parameters.enableFortifyPackage }}
+              fortifyBuildId: ${{ parameters.fortifyBuildId }}
+              prePublishSteps: ${{ parameters.prePublishSteps }}

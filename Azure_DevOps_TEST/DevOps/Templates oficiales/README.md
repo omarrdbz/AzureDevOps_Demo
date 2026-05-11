@@ -16,11 +16,13 @@ Templates oficiales/
 │   └── nodejs-webapp.yml
 └── templates/
     ├── stage-ci.yml
+    ├── stage-ci-dotnet-framework481.yml
     ├── stage-sast.yml
     ├── stage-cd.yml
     ├── stage-security-review.yml
     ├── stage-uat.yml
     ├── steps-ci.yml
+    ├── steps-ci-dotnet-framework481.yml
     ├── steps-sast-fortify.yml
     └── steps-cd-iis.yml
 ```
@@ -71,6 +73,22 @@ Parámetros principales:
 | `artifactName` | Nombre base del artefacto de aplicación |
 | `enableSnykSCA` | Habilita Snyk Open Source |
 | `enableNativeDependencyScan` | Habilita NuGet Audit o npm audit |
+| `enableFortifyPackage` | Publica `FortifyPackage-{BuildNumber}` |
+
+### `stage-ci-dotnet-framework481.yml`
+
+Wrapper de stage para `steps-ci-dotnet-framework481.yml`. Usar este template para aplicaciones ASP.NET/IIS en .NET Framework 4.8.1 que requieren Visual Studio/MSBuild, `NuGetCommand@2` y `VSTest@2`, en lugar de `DotNetCoreCLI@2`.
+
+Parámetros principales:
+
+| Parámetro | Uso |
+|---|---|
+| `vmImage` | Imagen Windows con Visual Studio 2022 y .NET Framework 4.8.1 Developer Pack |
+| `solutionPath` | Ruta de la solución `.sln` usada para restore/build/Fortify |
+| `projectPath` | Proyecto web `.csproj` publicado como artefacto IIS |
+| `buildPlatform` | Plataforma MSBuild, por ejemplo `Any CPU` |
+| `vsVersion` | Versión de Visual Studio para `VSBuild@1`, por defecto `17.0` |
+| `enableSnykSCA` | Habilita Snyk Open Source |
 | `enableFortifyPackage` | Publica `FortifyPackage-{BuildNumber}` |
 
 ### `stage-sast.yml`
