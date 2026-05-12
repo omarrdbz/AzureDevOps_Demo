@@ -16,6 +16,10 @@ parameters:
     type: string
     default: 'C:\inetpub\wwwroot\WebApp'
 
+  - name: deployServer
+    type: string
+    default: ''
+
   - name: backupPath
     type: string
     default: 'C:\deploy-backups\WebApp'
@@ -23,6 +27,13 @@ parameters:
   - name: msdeployPath
     type: string
     default: 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe'
+
+  - name: webDeployConnectionMode
+    type: string
+    default: 'wmsvcNtlm'
+    values:
+      - wmsvcNtlm
+      - wmsvcBasic
 
   - name: healthCheckEndpoint
     type: string
@@ -98,8 +109,10 @@ stages:
                     environment: ${{ parameters.environment }}
                     artifactName: ${{ parameters.artifactName }}
                     deployPath: ${{ parameters.deployPath }}
+                    deployServer: ${{ parameters.deployServer }}
                     backupPath: ${{ parameters.backupPath }}
                     msdeployPath: ${{ parameters.msdeployPath }}
+                    webDeployConnectionMode: ${{ parameters.webDeployConnectionMode }}
                     healthCheckEndpoint: ${{ parameters.healthCheckEndpoint }}
                     healthCheckRetries: ${{ parameters.healthCheckRetries }}
                     healthCheckDelaySeconds: ${{ parameters.healthCheckDelaySeconds }}

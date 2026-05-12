@@ -21,7 +21,15 @@ parameters:
 
   - name: buildPlatform
     type: string
+    # Debe coincidir exactamente con la plataforma definida en la .sln.
+    # En soluciones Visual Studio clasicas normalmente es "Any CPU", con espacio.
     default: 'Any CPU'
+
+  - name: publishPlatform
+    type: string
+    # Usar cuando el .csproj define otra plataforma, por ejemplo "AnyCPU".
+    # Si se deja vacio, publish usa buildPlatform.
+    default: ''
 
   - name: vsVersion
     type: string
@@ -111,6 +119,7 @@ stages:
               projectPath: ${{ parameters.projectPath }}
               buildConfiguration: ${{ parameters.buildConfiguration }}
               buildPlatform: ${{ parameters.buildPlatform }}
+              publishPlatform: ${{ parameters.publishPlatform }}
               vsVersion: ${{ parameters.vsVersion }}
               msbuildArchitecture: ${{ parameters.msbuildArchitecture }}
               nugetVersion: ${{ parameters.nugetVersion }}

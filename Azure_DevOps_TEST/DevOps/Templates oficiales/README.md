@@ -86,7 +86,8 @@ Parámetros principales:
 | `vmImage` | Imagen Windows con Visual Studio 2022 y .NET Framework 4.8.1 Developer Pack |
 | `solutionPath` | Ruta de la solución `.sln` usada para restore/build/Fortify |
 | `projectPath` | Proyecto web `.csproj` publicado como artefacto IIS |
-| `buildPlatform` | Plataforma MSBuild, por ejemplo `Any CPU` |
+| `buildPlatform` | Plataforma MSBuild exactamente como aparece en la `.sln`, por ejemplo `Any CPU` |
+| `publishPlatform` | Plataforma del `.csproj` para publish cuando difiere de la solución, por ejemplo `AnyCPU` |
 | `vsVersion` | Versión de Visual Studio para `VSBuild@1`, por defecto `17.0` |
 | `enableSnykSCA` | Habilita Snyk Open Source |
 | `enableNativeDependencyScan` | Habilita NuGet Audit nativo durante restore |
@@ -124,7 +125,9 @@ Parámetros principales:
 | `pool` | Agent Pool self-hosted |
 | `variableGroup` | Variables y secretos del ambiente |
 | `deployPath` | Ruta física del sitio IIS |
+| `deployServer` | FQDN o hostname del servidor IIS destino; si se omite, se lee de la variable `DeployServer` |
 | `backupPath` | Ruta de backups rotativos |
+| `webDeployConnectionMode` | `wmsvcNtlm` por defecto; usa la identidad AD del agente. Usar `wmsvcBasic` solo si el deploy va por WMSVC con credenciales explícitas |
 | `healthCheckEndpoint` | Endpoint usado para validar el despliegue |
 | `enableAutoRollback` | Restaura backup si el health check falla |
 | `enableSnykApiWebDAST` | Ejecuta DAST post-deploy desde el agente self-hosted |
@@ -162,8 +165,9 @@ Variable Group por ambiente:
 |---|---|
 | `WebsiteName` | Nombre del sitio en IIS |
 | `SiteUrl` | URL base del sitio |
-| `WebDeployUser` | Cuenta de servicio Web Deploy |
-| `WebDeployPassword` | Secreto de la cuenta de servicio |
+| `DeployServer` | Servidor IIS destino para Web Deploy remoto, por ejemplo `iis-test01.dominio.local` |
+| `WebDeployUser` | Solo requerido si `webDeployConnectionMode = wmsvcBasic` |
+| `WebDeployPassword` | Solo requerido si `webDeployConnectionMode = wmsvcBasic` |
 | `ProbelyApiKey` | API key de Snyk API & Web, solo si DAST está habilitado |
 
 Variable Group Fortify:
@@ -191,9 +195,11 @@ SAST:
 CD:
 
 - Agente self-hosted con acceso al servidor IIS.
-- Web Deploy 3.6+ y WMSVC habilitado.
+- Web Deploy 3.6+ instalado en el agente y en el servidor IIS destino.
+- WMSVC habilitado en el servidor destino y accesible por `https://<DeployServer>:8172/msdeploy.axd`.
 - Sitio IIS creado antes del primer despliegue.
-- Permisos de Web Deploy delegados a la cuenta de servicio.
+- Cuenta AD que ejecuta el agente self-hosted autorizada en Web Deploy/IIS del servidor destino.
+- Usuario/password de Web Deploy solo si se usa `webDeployConnectionMode: wmsvcBasic`.
 - Probely CLI instalado en el agente cuando DAST esté habilitado.
 - Conectividad desde el agente hacia la URL interna de QA/Test.
 - Salida HTTPS 443 desde el agente hacia `api.probely.com`.
@@ -204,7 +210,7 @@ CD:
 |---|---|
 | Artefacto inmutable | CI publica una sola vez; CD descarga el mismo artefacto |
 | Secretos fuera del código | Variable Groups y variables de entorno |
-| Menor privilegio | Web Deploy por WMSVC delegado |
+| Menor privilegio | Web Deploy remoto con autenticación integrada (`wmsvcNtlm`) usando la identidad AD del agente |
 | SCA | Snyk Open Source y escaneo nativo opcional |
 | SAST | Fortify ScanCentral con quality gate |
 | DAST | Snyk API & Web orquestado desde el agente self-hosted en Test |
